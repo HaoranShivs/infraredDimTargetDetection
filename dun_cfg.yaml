@@ -1,0 +1,13 @@
+multiscalefeature_outchannel:
+  - 16
+  - 32
+  - 48
+  - 64
+
+hide_channel: 32
+
+ratio_list:
+  - 0.2
+  - 0.8
+featurefusion_outchannel: 128
+channel4upscale: 4
