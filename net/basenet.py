@@ -27,16 +27,16 @@ class ResBlock(nn.Module):
     def __init__(
         self,
         in_channel: int = 32,
-        hide_channel: int = 32,
         out_channel: int = 32,
         kernel_size: int = 3,
         stride: int = 1,
     ):
         super(ResBlock, self).__init__()
+        hide_channel = int(out_channel/2)
         self.conv2d1 = nn.Conv2d(in_channel, hide_channel, kernel_size, stride, 1)
         self.conv2d2 = nn.Conv2d(hide_channel, out_channel, kernel_size, stride, 1)
         # self.conv2d3 = nn.Conv2d(out_channel, out_channel, 1, 1)
-        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.bn1 = nn.BatchNorm2d(hide_channel)
         self.bn2 = nn.BatchNorm2d(out_channel)
         # self.bn3 = nn.BatchNorm2d(out_channel)
         self.relu = nn.ReLU()
@@ -76,9 +76,9 @@ class Resconv(nn.Module):
     def __init__(self, in_channel=1, out_channel=32, down_sampler=None):
         super(Resconv, self).__init__()
 
-        self.block1 = ResBlock(in_channel, out_channel, out_channel)
-        self.block2 = ResBlock(out_channel, out_channel, out_channel)
-        self.block3 = ResBlock(out_channel, out_channel, out_channel)
+        self.block1 = ResBlock(in_channel, out_channel)
+        self.block2 = ResBlock(out_channel, out_channel)
+        self.block3 = ResBlock(out_channel, out_channel)
 
         self.down_sampler = down_sampler
 
@@ -302,6 +302,63 @@ class LargeBaseNet(nn.Module):
 
         downsampler = nn.MaxPool2d(2, 2)
         self.resconv = Resconv(in_channel, cfg["resconv_outchannel"])
+
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler
+        )
+        self.ffusion = FeatureFusionNet2(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"],
+            cfg["featurefusion_outchannel"],
+            cfg["ratio_list"],
+        )
+        self.detect = DetectNet4(cfg["featurefusion_outchannel"], 1)
+
+    def forward(self, img):
+        x = self.resconv(img)  # (B, C, 256, 256)
+        x11, x21, x31 = self.multiscalef(x)
+        xf1 = self.ffusion(x, x11, x21, x31)  # (B, C, 256, 256)
+        result = self.detect(xf1)
+        return result
+    
+
+class LargeBaseNet2(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(LargeBaseNet2, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        downsampler = nn.MaxPool2d(2, 2)
+        self.resconv_deep = Resconv(in_channel, cfg["resconv_outchannel"], downsampler)
+        self.resconv_shallow = Resconv(in_channel, cfg["resconv_outchannel"])
+
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler
+        )
+        self.ffusion = FeatureFusionNet2(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"],
+            cfg["featurefusion_outchannel"],
+            cfg["ratio_list"],
+        )
+        self.detect = DetectNet4(cfg["featurefusion_outchannel"] + cfg["resconv_outchannel"], 1)
+
+    def forward(self, img):
+        x1 = self.resconv_deep(img)  # (B, C, 128, 128)
+        x11, x21, x31 = self.multiscalef(x1)
+        xf1 = self.ffusion(x1, x11, x21, x31)  # (B, C, 128, 128)
+        x2 = self.resconv_shallow(img)
+        xf1 = torch.cat((x2, xf1.repeat(1, 1, 2, 2)), dim=1)
+        result = self.detect(xf1)
+        return result
+    
+
+class YoloNet(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(YoloNet, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        downsampler = nn.MaxPool2d(2, 2)
+        self.resconv = Resconv(in_channel, cfg["resconv_outchannel"], downsampler)
 
         self.multiscalef = MultiScaleFeatureNet(
             cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler

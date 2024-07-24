@@ -12,8 +12,8 @@ from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
 # from models import get_model
-from dataprocess.sirst import NUDTDataset
-from net.basenet import BaseNet1, BaseNet2, LargeBaseNet
+from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
+from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -82,9 +82,7 @@ def parse_args():
     #     set_seeds(args.seed)
 
     # logger
-    args.logger = setup_logger(
-        "BaseNet for GuassBorder test", args.save_folder, 0, filename="log.txt", mode="a"
-    )
+    args.logger = setup_logger("BaseNet for test", args.save_folder, 0, filename="log.txt", mode="a")
     return args
 
 
@@ -111,19 +109,23 @@ class Trainer(object):
         ## dataset
         if args.dataset == "nudt":
             trainset = NUDTDataset(
-                base_dir=r"W:/DataSets/Infraid_datasets/NUDT-SIRST", mode="train", base_size=args.base_size
+                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size
             )
             valset = NUDTDataset(
-                base_dir=r"W:/DataSets/Infraid_datasets/NUDT-SIRST", mode="test", base_size=args.base_size
+                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size
             )
         # elif args.dataset == 'sirstaug':
         #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
         #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
         #     valset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
         #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
-        # elif args.dataset == 'irstd1k':
-        #     trainset = IRSTD1kDataset(base_dir=r'./datasets/IRSTD-1k', mode='train', base_size=args.base_size) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
-        #     valset = IRSTD1kDataset(base_dir=r'./datasets/IRSTD-1k', mode='test', base_size=args.base_size) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
+        elif args.dataset == "irstd1k":
+            trainset = IRSTD1kDataset(
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size
+            )
+            valset = IRSTD1kDataset(
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size
+            )
         else:
             raise NotImplementedError
 
@@ -138,7 +140,7 @@ class Trainer(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = LargeBaseNet(cfg=self.cfg)
+        self.net = LargeBaseNet2(cfg=self.cfg)
 
         # self.net.apply(self.weight_init)
         self.net = self.net.to(self.device)
