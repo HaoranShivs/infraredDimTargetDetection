@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 # from models import get_model
 from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2
+from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -77,7 +77,7 @@ class Evaluate(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = LargeBaseNet2(cfg=self.cfg)
+        self.net = GaussNet(cfg=self.cfg)
 
         ## load_model
         model_path = osp.join(args.model_path, 'best.pkl')
@@ -96,6 +96,7 @@ class Evaluate(object):
         self.eval_my_PD_FA = my_PD_FA()
 
         ## visualization
+        self.best_ori_pict = None
         self.best_seg_pict = None
         self.best_seg_label = None
     
@@ -109,8 +110,10 @@ class Evaluate(object):
             # out_D, out_T = out_D.cpu(), out_T.cpu()
             out_T = y_hat.cpu()
 
+            labels = (labels > 0.5).type(torch.float32)
             loss_softiou = self.softiou(out_T, labels)
             if (loss_softiou < loss):
+                self.best_ori_pict = data.cpu()
                 self.best_seg_pict = out_T
                 self.best_seg_label = labels
                 loss = loss_softiou
@@ -130,33 +133,34 @@ class Evaluate(object):
         print(miou, self.best_miou, fmeasure, self.best_fmeasure)
 
     def visualize(self):
-        segpict = np.array(self.best_seg_pict[:4]) * 256
-        label = np.array(self.best_seg_label[:4]) * 256
+        oripict = np.array(self.best_ori_pict) * 255
+        segpict = np.array(self.best_seg_pict) * 255
+        label = np.array(self.best_seg_label) * 255
 
         n = segpict.shape[0]  # 图片对的数量
         shape = label.shape[-2:]
 
-        # print(segpict)
-        # print(label)
-
         # 创建一个n行2列的子图网格
-        fig, axes = plt.subplots(n, 2, figsize=(5, 2*n))  # 调整figsize以适应你的需要
+        fig, axes = plt.subplots(n, 3, figsize=(6, 3*n))  # 调整figsize以适应你的需要
 
         for i in range(n):
-            
-            # 在当前行的第一列显示第一张图片
-            axes[i, 0].imshow(segpict[i].reshape(*shape), cmap='gray')
+            # 在当前行的第一列显示第1张图片
+            axes[i, 0].imshow(oripict[i].reshape(*shape), cmap='gray')
             axes[i, 0].axis('off')  # 关闭坐标轴显示
             
-            # 在当前行的第二列显示第二张图片
-            axes[i, 1].imshow(label[i].reshape(*shape), cmap='gray')
-            axes[i, 1].axis('off')  # 同样关闭坐标轴显示
+            # 在当前行的第一列显示第2张图片
+            axes[i, 1].imshow(segpict[i].reshape(*shape), cmap='gray')
+            axes[i, 1].axis('off')  # 关闭坐标轴显示
+            
+            # 在当前行的第二列显示第3张图片
+            axes[i, 2].imshow(label[i].reshape(*shape), cmap='gray')
+            axes[i, 2].axis('off')  # 同样关闭坐标轴显示
 
         # 显示图表
         plt.tight_layout()  # 自动调整子图参数，使之填充整个图像区域
 
         # 保存图表、
-        save_path= osp.join(self.args.model_path, 'result.png')
+        save_path= osp.join(self.args.model_path, args.dataset + '_result.png')
         plt.savefig(save_path)
 
 

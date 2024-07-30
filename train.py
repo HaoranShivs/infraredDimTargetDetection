@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 # from models import get_model
 from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2
+from net.basenet import BaseNet1, BaseNet2, BaseNet3, LargeBaseNet, LargeBaseNet2, GaussNet
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -140,7 +140,7 @@ class Trainer(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = LargeBaseNet2(cfg=self.cfg)
+        self.net = GaussNet(cfg=self.cfg)
 
         # self.net.apply(self.weight_init)
         self.net = self.net.to(self.device)
@@ -184,7 +184,7 @@ class Trainer(object):
         # base_log = "Epoch-Iter: [{:d}/{:d}]-[{:d}/{:d}] || Lr: {:.6f} || Loss: {:.4f}={:.4f}+{:.4f} || " \
         #            "Cost Time: {} || Estimated Time: {}"
         base_log = (
-            "Epoch-Iter: [{:d}/{:d}]-[{:d}/{:d}] || Lr: {:.6f} || Loss: {:.4f} || "
+            "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}] || Lr: {:.6f} || Loss: {:.4f} || "
             "Cost Time: {} || Estimated Time: {}"
         )
 
@@ -195,6 +195,7 @@ class Trainer(object):
 
                 y_hat = self.net(data)
 
+                labels = (labels > 0.5).type(torch.float32)
                 loss_softiou = self.softiou(y_hat, labels)
                 # gamma = torch.Tensor([0.1]).to(self.device)
                 # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
@@ -253,7 +254,8 @@ class Trainer(object):
             # loss_mse = self.mse(out_D, data)
             # gamma = torch.Tensor([0.1]).to(self.device)
             # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
-
+            
+            labels = (labels > 0.5).type(torch.float32)
             self.metric.update(labels, out_T)
 
         miou, prec, recall, fmeasure = self.metric.get()

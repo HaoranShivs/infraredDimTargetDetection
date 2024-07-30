@@ -7,5 +7,6 @@ ratio_list:
   - 0.33
   - 0.33
   - 0.33
+gauss_sigma: 0.6
 featurefusion_outchannel: 128
 channel4upscale: 4
