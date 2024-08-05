@@ -6,29 +6,31 @@ from net.utils import hide_channels, gaussian_kernel
 
 class GaussianConv2d(nn.Module):
     """only work for data distributed in [-a, a]"""
-    def __init__(self, kernel_size, sigma=0.6, tempreture=2.5):
+
+    def __init__(self, in_channel, kernel_size, sigma=0.6):
         super(GaussianConv2d, self).__init__()
-        self.kernel_size = kernel_size
-        self.padding = kernel_size // 2
-        self.tempreture = tempreture
+        padding = kernel_size // 2
+        self.tempreture = nn.Parameter(torch.tensor(2.5))
 
         # 创建高斯核
         kernel = gaussian_kernel(kernel_size, sigma)
         kernel = kernel.unsqueeze(0).unsqueeze(0)  # 添加通道维度
 
-        # 创建卷积层
-        self.conv = nn.Conv2d(1, 1, kernel_size, padding=self.padding, bias=False)
-        self.conv.weight.data = kernel  # 设置权重
-        self.conv.weight.requires_grad = False  # 不需要梯度更新
+        # 创建Gauss卷积层
+        self.atten = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+        self.atten.weight.data = kernel  # 设置权重
+        self.atten.weight.requires_grad = False  # 不需要梯度更新
 
         # Gauss saliency
+        self.recov = Conv2d_Bn_Relu(in_channel, 1, 1, 1)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x = x.view(B*C, 1, H, W)
-        gauss_f = self.conv(x).view(B, C, H, W)
-        return self.sigmoid(self.tempreture * gauss_f)*2-1
+
+    def forward(self, input):
+        img = self.recov(input) # (B, 1, H, W)
+        gauss_f = self.atten(img)   # (-1,1)
+        res = self.sigmoid(gauss_f * self.tempreture) * 2 - 1
+        return torch.abs(res)   # return positive attention (B, 1, H, W)
 
 
 class Conv2d_Bn_Relu(nn.Module):
@@ -81,43 +83,23 @@ class ResBlock(nn.Module):
         x = self.relu(x)
         return x
 
+class Gauss_ResBlock(nn.Module):
+    def __init__(self, in_channel: int = 32, out_channel: int = 32, kernel_size: int = 3, stride: int = 1, gauss_sigma=0.6):
+        super(Gauss_ResBlock, self).__init__()
 
-class DeepFeatureExtractor(nn.Module):
-    def __init__(
-        self,
-        in_channel: int = 32,
-        out_channel: int = 32,
-        kernel_size: int = 3,
-        stride: int = 1,
-    ):
-        super(DeepFeatureExtractor, self).__init__()
-        self.conv2d1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
-        self.conv2d2 = Conv2d_Bn_Relu(out_channel, out_channel, 1, 1)
+        self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
+        # attention
+        self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, 1, 1)
+        self.bn2 = nn.BatchNorm2d(out_channel)
+        self.relu2 = nn.ReLU()
 
-    def forward(self, inputs):
-        x = self.conv2d1(inputs)
-        x = self.conv2d2(x)
-        return x
-
-
-class UpScaler(nn.Module):
-    def __init__(self, in_channel = 32, out_channel = 32, kernel_size = 3, is_lastone = False):
-        super(UpScaler, self).__init__()
-        self.proj1 = DeepFeatureExtractor(in_channel, in_channel, kernel_size, 1)
-        self.convT = nn.ConvTranspose2d(in_channel, out_channel, kernel_size, 2, 1, 1)
-        self.bn = nn.BatchNorm2d(out_channel)
-        self.relu = nn.ReLU()
-        self.proj2 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
-        self.proj3 = DeepFeatureExtractor(out_channel, out_channel, kernel_size, 1) if not is_lastone else None
-
-    def forward(self, f_deep, f_shallow=None):
-        x1 = self.proj1(f_deep)
-        x1 = self.proj2(self.relu(self.bn(self.convT(x1))))
-        if self.proj3 is None:
-            return x1
-        x2 = self.proj3(f_shallow)
-        res = torch.max(x1, x2)
-        return res
+    def forward(self, shallow_feature):
+        f = self.conv1(shallow_feature)
+        atten = self.gauss(f)
+        deep_feature = self.bn2(self.conv2(f * atten))
+        deep_feature = self.relu2(deep_feature + shallow_feature)
+        return deep_feature
 
 
 class Resconv(nn.Module):
@@ -143,114 +125,154 @@ class Resconv(nn.Module):
         x = self.down_sampler(x) if self.down_sampler is not None else x
         return x
 
+class Gauss_Resconv(nn.Module):
+    def __init__(self, in_channel=1, out_channel=32, gauss_sigma=0.6, down_sampler=None):
+        super(Gauss_Resconv, self).__init__()
 
-class MultiScaleFeatureNet(nn.Module):
-    def __init__(self, in_channel=None, out_channel_list=None, downsampler=None):
-        super(MultiScaleFeatureNet, self).__init__()
-        if out_channel_list is None:
-            raise ValueError("parameter 'out_channel_list' is not given")
+        self.block1 = Gauss_ResBlock(in_channel, out_channel, gauss_sigma=gauss_sigma)
+        self.block2 = Gauss_ResBlock(out_channel, out_channel, gauss_sigma=gauss_sigma)
+        self.block3 = Gauss_ResBlock(out_channel, out_channel, gauss_sigma=gauss_sigma)
 
-        self.scale1 = nn.Sequential(
-            Conv2d_Bn_Relu(in_channel, out_channel_list[0], 3, 1, 1),
-            Conv2d_Bn_Relu(out_channel_list[0], out_channel_list[0], 3, 1, 1),
-            downsampler,
-        )
+        self.down_sampler = down_sampler
 
-        self.scale2 = nn.Sequential(
-            Conv2d_Bn_Relu(out_channel_list[0], out_channel_list[1], 3, 1, 1),
-            Conv2d_Bn_Relu(out_channel_list[1], out_channel_list[1], 3, 1, 1),
-            downsampler,
-        )
-
-        self.scale3 = nn.Sequential(
-            Conv2d_Bn_Relu(out_channel_list[1], out_channel_list[2], 3, 1, 1),
-            Conv2d_Bn_Relu(out_channel_list[2], out_channel_list[2], 3, 1, 1),
-            downsampler,
-        )
-
-    def forward(self, shallow_feature):
+    def forward(self, img):
         """
         args:
-            shallow_feature(torch.tensor): (B, C1, H, W)
+            img(torch.tensor): (B, C1, H, W)
         output:
-            (...,H/2, W/2)
-            (...,H/4, W/4)
-            (...,H/8, W/8)
+            reconstructed_img(torch.tensor): ( B, C2, H, W)
         """
-        x1 = self.scale1(shallow_feature)  # 64
-        x2 = self.scale2(x1)  # 32
-        x3 = self.scale3(x2)  # 16
-        return x1, x2, x3
+        x = self.block1(img)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.down_sampler(x) if self.down_sampler is not None else x
+        return x
+
+
+class ShallowFeatureExtractor(nn.Module):
+    def __init__(
+        self,
+        in_channel: int = 32,
+        out_channel: int = 32,
+        kernel_size: int = 3,
+        stride: int = 1,
+        downsampler=None,
+    ):
+        super(ShallowFeatureExtractor, self).__init__()
+        self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
+        self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, kernel_size, stride, 1)
+        self.downsampler = downsampler
+
+    def forward(self, inputs):
+        x = self.conv1(inputs)
+        x = self.conv2(x)
+        x = self.downsampler(x) if self.downsampler is not None else x
+        return x
+
+
+class DeepFeatureExtractor(nn.Module):
+    def __init__(
+        self,
+        in_channel: int = 32,
+        out_channel: int = 32,
+        kernel_size: int = 3,
+        stride: int = 1,
+    ):
+        super(DeepFeatureExtractor, self).__init__()
+        self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
+        self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, 1, 1)
+
+    def forward(self, inputs):
+        x = self.conv1(inputs)
+        x = self.conv2(x)
+        return x
 
 
 class Conv2d_with_Gauss(nn.Module):
-    def __init__(self, in_channel=None, out_channel=None, gauss_sigma=0.6, downsampler=None):
+    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, downsampler=None):
         super(Conv2d_with_Gauss, self).__init__()
 
         # attention
-        self.proj0 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
-        self.gauss = GaussianConv2d(3, gauss_sigma)
+        self.gauss = GaussianConv2d(in_channel, 3, gauss_sigma)
+        self.conv = ShallowFeatureExtractor(in_channel, out_channel, 3, 1, downsampler)
+
+    def forward(self, shallow_feature):
+        atten = self.gauss(shallow_feature)
+        deep_feature = self.conv(shallow_feature * atten)
+        return deep_feature
+    
+class Conv2d_with_Gauss2(nn.Module):
+    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, downsampler=None):
+        super(Conv2d_with_Gauss2, self).__init__()
 
         self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
-        self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
+        # attention
+        self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
+        self.conv2 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
         self.downsampler = downsampler
 
     def forward(self, shallow_feature):
-        atten = self.gauss(self.proj0(shallow_feature))
-        x1 = self.conv1(shallow_feature*atten)
-        deep_feature = self.conv2(x1)
-        deep_feature = self.downsampler(deep_feature)
+        f = self.conv1(shallow_feature)
+        atten = self.gauss(f)
+        deep_feature = self.conv2(f * atten)
+        return deep_feature
+    
+class Conv2d_with_Gauss3(nn.Module):
+    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, downsampler=None):
+        super(Conv2d_with_Gauss3, self).__init__()
+
+        self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
+        # attention
+        self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
+        self.conv2 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
+        self.downsampler = downsampler
+
+    def forward(self, shallow_feature):
+        f = self.conv1(shallow_feature)
+        atten = self.gauss(f)
+        deep_feature = self.conv2(f + atten)
         return deep_feature
 
 
-class MultiScaleFeatureNet_gauss(nn.Module):
-    def __init__(self, in_channel=None, out_channel_list=None, gauss_sigme=0.6, downsampler=None):
-        super(MultiScaleFeatureNet_gauss, self).__init__()
-        if out_channel_list is None:
-            raise ValueError("parameter 'out_channel_list' is not given")
+class UpScaler(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size=3, is_lastone=False):
+        super(UpScaler, self).__init__()
+        self.proj1 = DeepFeatureExtractor(in_channel, in_channel, kernel_size, 1)
+        self.convT = nn.ConvTranspose2d(in_channel, out_channel, kernel_size, 2, 1, 1)
+        self.bn = nn.BatchNorm2d(out_channel)
+        self.relu = nn.ReLU()
+        self.proj2 = DeepFeatureExtractor(out_channel, out_channel, kernel_size, 1) if not is_lastone else None
 
-        self.scale1 = Conv2d_with_Gauss(in_channel, out_channel_list[0], gauss_sigme, downsampler)
-        self.scale2 = Conv2d_with_Gauss(out_channel_list[0], out_channel_list[1], gauss_sigme, downsampler)
-        self.scale3 = Conv2d_with_Gauss(out_channel_list[1], out_channel_list[2], gauss_sigme, downsampler)
+    def forward(self, f_deep, f_shallow=None):
+        x1 = self.proj1(f_deep)
+        x1 = self.relu(self.bn(self.convT(x1)))
+        if self.proj2 is None:
+            return x1
+        x2 = self.proj2(f_shallow)
+        res = torch.max(x1, x2)
+        return res
 
-    def forward(self, shallow_feature):
-        """
-        input:
-            shallow_feature(torch.tensor): (B, C1, H, W)
-        output:
-            (...,C2, H/2, W/2)
-            (...,C3, H/4, W/4)
-            (...,C4, H/8, W/8)
-        """
-        x1 = self.scale1(shallow_feature)  # 64
-        x2 = self.scale2(x1)  # 32
-        x3 = self.scale3(x2)  # 16
-        return x1, x2, x3
- 
 
-class MultiScaleFeatureNet_simple(nn.Module):
-    def __init__(self, in_channel=None, out_channel_list=None, downsampler=None):
-        super(MultiScaleFeatureNet_simple, self).__init__()
-        if out_channel_list is None:
-            raise ValueError("parameter 'out_channel_list' is not given")
+class MultiScaleFeatureNet(nn.Module):
+    def __init__(self, in_channel, out_channel_list, gauss=False, cfg=None, downsampler=None):
+        super(MultiScaleFeatureNet, self).__init__()
 
-        self.scale1 = nn.Sequential(
-            Conv2d_Bn_Relu(in_channel, in_channel, 3, 1, 1),
-            Conv2d_Bn_Relu(in_channel, out_channel_list[0], 3, 1, 1),
-            downsampler,
-        )
+        out_channel_list.insert(0, in_channel)
 
-        self.scale2 = nn.Sequential(
-            Conv2d_Bn_Relu(out_channel_list[0], out_channel_list[0], 3, 1, 1),
-            Conv2d_Bn_Relu(out_channel_list[0], out_channel_list[1], 3, 1, 1),
-            downsampler,
-        )
+        pyramid_layers = []
+        for i in range(1, len(out_channel_list)):
+            if gauss:
+                layer = Conv2d_with_Gauss3(
+                    out_channel_list[i - 1],
+                    out_channel_list[i],
+                    cfg["gauss_sigma"],
+                    downsampler,
+                )
+            else:
+                layer = ShallowFeatureExtractor(out_channel_list[i - 1], out_channel_list[i], 3, 1, downsampler)
+            pyramid_layers.append(layer)
 
-        self.scale3 = nn.Sequential(
-            Conv2d_Bn_Relu(out_channel_list[1], out_channel_list[1], 3, 1, 1),
-            Conv2d_Bn_Relu(out_channel_list[1], out_channel_list[2], 3, 1, 1),
-            downsampler,
-        )
+        self.pyramid = nn.ModuleList(pyramid_layers)
 
     def forward(self, shallow_feature):
         """
@@ -260,11 +282,14 @@ class MultiScaleFeatureNet_simple(nn.Module):
             (...,H/2, W/2)
             (...,H/4, W/4)
             (...,H/8, W/8)
+            ...
         """
-        x1 = self.scale1(shallow_feature)  # 64
-        x2 = self.scale2(x1)  # 32
-        x3 = self.scale3(x2)  # 16
-        return x1, x2, x3
+        outputs = []
+        x = shallow_feature
+        for i in self.pyramid:
+            x = i(x)
+            outputs.append(x)
+        return outputs
 
 
 class FusionNet_plus(nn.Module):
@@ -281,14 +306,14 @@ class FusionNet_plus(nn.Module):
         f2 = self.comp2(feature2).repeat(1, 1, 2, 2)
         f3 = self.comp3(feature3).repeat(1, 1, 4, 4)
 
-
         mixf = f1 + f2 + f3 + f4
 
         return mixf
 
 
+"""
 class FusionNet_cat(nn.Module):
-    def __init__(self, in_channel_list=None, out_channel=256, ratio_list=None):
+    def __init__(self, in_channel_list=None, out_channel=256):
         super(FusionNet_cat, self).__init__()
         # sum(in_channel_list[-1:]), sum(in_channel_list[-1:])
         self.cf1 = DeepFeatureExtractor(sum(in_channel_list[:1]), sum(in_channel_list[:1]), 3, 1)
@@ -310,26 +335,35 @@ class FusionNet_cat(nn.Module):
         fusion_feature = self.transform(f4)
 
         return fusion_feature
+"""
 
 
 class FusionNet_upscale(nn.Module):
-    def __init__(self, in_channel_list=None, out_channel=16, ratio_list=None):
+    def __init__(self, in_channel_list, out_channel):
         super(FusionNet_upscale, self).__init__()
-        self.comp1 = UpScaler(in_channel_list[0], out_channel, 3, is_lastone=True)
-        self.comp2 = UpScaler(in_channel_list[1], in_channel_list[0], 3)
-        self.comp3 = UpScaler(in_channel_list[2], in_channel_list[1], 3)
-        self.comp4 = UpScaler(in_channel_list[3], in_channel_list[2], 3)
 
-    def forward(self, feature1, feature2, feature3, feature4):
-        f3 = self.comp4(feature4, feature3)
-        f2 = self.comp3(f3, feature2)
-        f1 = self.comp2(f2, feature1)
-        res = self.comp1(f1)    #(B, C, 256, 256)
+        SRer_layers = []
+        for i in range(len(in_channel_list) - 1, 1, -1):
+            SRer_layers.append(UpScaler(in_channel_list[i], in_channel_list[i - 1], 3))
+        SRer_layers.append(UpScaler(in_channel_list[0], out_channel, 3, is_lastone=True))
+
+        self.SRer = nn.ModuleList(SRer_layers)
+
+    def forward(self, inputs):
+
+        if len(inputs) != len(self.SRer):
+            raise ValueError("inputs of FusionNet is not same with cfg['multiscalefeature_outchannel']")
+
+        xd = inputs[len(inputs) - 1]
+        for i in range(0, len(self.SRer)-1):
+            xs = inputs[len(inputs) - 2 - i]
+            xd = self.SRer[i](xd, xs)
+        res = self.SRer[-1](xd)
         return res
 
 
 class DetectNet1(nn.Module):
-    def __init__(self, in_channel=None, out_channel=None):
+    def __init__(self, in_channel, out_channel):
         super(DetectNet1, self).__init__()
         self.conv = nn.Conv2d(in_channel, out_channel, 1, 1)
 
@@ -342,45 +376,19 @@ class DetectNet1(nn.Module):
 
 
 class DetectNet2(nn.Module):
-    def __init__(self, in_channel=None, out_channel=None):
+    def __init__(self, in_channel, out_channel, thre_min=0.01, thre_max=0.5):
         super(DetectNet2, self).__init__()
-        self.upscale = nn.ConvTranspose2d(in_channel, out_channel, 3, 2, 1, 1)
+        self.thre_min = thre_min
+        self.thre_max = thre_max
+        self.conv = Conv2d_Bn_Relu(in_channel, out_channel, 1, 1)
 
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, feature):
-        result = self.upscale(feature)
-        result = self.sigmoid(result)
-        return result
-
-
-class DetectNet3(nn.Module):
-    def __init__(self, in_channel=None, out_channel=None):
-        super(DetectNet3, self).__init__()
-        self.final = nn.Conv2d(in_channel, out_channel, 3, 1, 1)
-
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, feature):
-        feature = feature.repeat(1, 1, 2, 2)
-        result = self.final(feature)
-        result = self.sigmoid(result)
-        return result
-
-
-class DetectNet4(nn.Module):
-    def __init__(self, in_channel=None, out_channel=None):
-        super(DetectNet4, self).__init__()
-        # self.final1 = nn.Conv2d(in_channel, in_channel, 3, 1, 1)
-        self.final = nn.Conv2d(in_channel, out_channel, 1, 1)
-
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, feature):
-        # feature = self.final1(feature)
-        result = self.final(feature)
-        result = self.sigmoid(result)
-        return result
+    def forward(self, input, oriP):
+        generP = self.conv(input)
+        # target = (torch.clamp(oriP - generP, self.thre_min, self.thre_max) - self.thre_min) / (self.thre_max - self.thre_min)
+        target = oriP - generP
+        return generP, target
 
 
 class BaseNet1(nn.Module):
@@ -397,9 +405,7 @@ class BaseNet1(nn.Module):
             cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler2
         )
         self.ffusion = FusionNet_plus(
-            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"],
-            cfg["featurefusion_outchannel"],
-            cfg["ratio_list"],
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
         )
         self.detect = DetectNet2(cfg["featurefusion_outchannel"], 1)
 
@@ -425,9 +431,7 @@ class BaseNet2(nn.Module):
             cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler2
         )
         self.ffusion = FusionNet_plus(
-            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"],
-            cfg["featurefusion_outchannel"],
-            cfg["ratio_list"],
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
         )
         self.detect = DetectNet2(cfg["featurefusion_outchannel"], 1)
 
@@ -450,19 +454,24 @@ class BaseNet3(nn.Module):
 
         downsampler2 = nn.MaxPool2d(2, 2)
         self.multiscalef = MultiScaleFeatureNet(
-            cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], downsampler2
+            cfg["resconv_outchannel"],
+            cfg["multiscalefeature_outchannel"],
+            0,
+            cfg,
+            downsampler2,
         )
         self.ffusion = FusionNet_upscale(
-            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], 32, cfg["ratio_list"]
-)
-        self.detect = DetectNet1(32, 1)
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
 
     def forward(self, img):
         x = self.resconv(img)
-        x11, x21, x31 = self.multiscalef(x)
-        xf1 = self.ffusion(x, x11, x21, x31)  # (B, C, 256, 256)
-        result = self.detect(xf1)
-        return result
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        # target = self.detect(xf1, img)
+        target = self.detect(xf1)
+        return target
 
 
 class LargeBaseNet(nn.Module):
@@ -533,20 +542,62 @@ class GaussNet(nn.Module):
         self.resconv = Resconv(in_channel, cfg["resconv_outchannel"], downsampler1)
 
         downsampler2 = nn.MaxPool2d(2, 2)
-        self.multiscalef = MultiScaleFeatureNet_gauss(
-            cfg["resconv_outchannel"], cfg["multiscalefeature_outchannel"], cfg["gauss_sigma"], downsampler2
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"],
+            cfg["multiscalefeature_outchannel"],
+            1,
+            cfg,
+            downsampler2,
         )
         self.ffusion = FusionNet_upscale(
-            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], 32, cfg["ratio_list"]
-)
-        self.detect = DetectNet1(32, 1)
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        # self.detect = DetectNet2(
+        #     cfg["featurefusion_outchannel"], 1, cfg["noise_filter_threshold"], cfg["background_aug_threshold"]
+        # )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
 
     def forward(self, img):
         x = self.resconv(img)
-        x11, x21, x31 = self.multiscalef(x)
-        xf1 = self.ffusion(x, x11, x21, x31)  # (B, C, 256, 256)
-        result = self.detect(xf1)
-        return result
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        # target = self.detect(xf1, img)
+        target = self.detect(xf1)
+        return target
+
+
+class GaussNet2(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(GaussNet2, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        downsampler1 = nn.MaxPool2d(3, 2, 1)
+        self.resconv = Gauss_Resconv(in_channel, cfg["resconv_outchannel"], cfg["gauss_sigma"], downsampler1)
+
+        downsampler2 = nn.MaxPool2d(2, 2)
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"],
+            cfg["multiscalefeature_outchannel"],
+            0,
+            cfg,
+            downsampler2,
+        )
+        self.ffusion = FusionNet_upscale(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        # self.detect = DetectNet2(
+        #     cfg["featurefusion_outchannel"], 1, cfg["noise_filter_threshold"], cfg["background_aug_threshold"]
+        # )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
+
+    def forward(self, img):
+        x = self.resconv(img)
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        # target = self.detect(xf1, img)
+        target = self.detect(xf1)
+        return target
 
 
 class YoloNet(nn.Module):

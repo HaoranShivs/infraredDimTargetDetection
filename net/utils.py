@@ -23,4 +23,5 @@ def gaussian_kernel(kernel_size, sigma):
     kernel_2d = torch.outer(kernel_1d, kernel_1d)
     # 归一化
     kernel_2d /= kernel_2d.sum()
+    kernel_2d[kernel_size // 2, kernel_size // 2] = -kernel_2d[kernel_size // 2, kernel_size // 2]
     return kernel_2d

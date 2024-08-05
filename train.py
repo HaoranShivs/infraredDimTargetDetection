@@ -13,8 +13,8 @@ from tqdm import tqdm
 
 # from models import get_model
 from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from net.basenet import BaseNet1, BaseNet2, BaseNet3, LargeBaseNet, LargeBaseNet2, GaussNet
-from utils.loss import SoftLoULoss
+from net.basenet import BaseNet1, BaseNet2, BaseNet3, LargeBaseNet, LargeBaseNet2, GaussNet, GaussNet2
+from utils.loss import SoftLoULoss, ImageRecoverLoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
 from utils.logger import setup_logger
@@ -82,7 +82,7 @@ def parse_args():
     #     set_seeds(args.seed)
 
     # logger
-    args.logger = setup_logger("BaseNet for test", args.save_folder, 0, filename="log.txt", mode="a")
+    args.logger = setup_logger("BaseNet test", args.save_folder, 0, filename="log.txt", mode="a")
     return args
 
 
@@ -140,14 +140,15 @@ class Trainer(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = GaussNet(cfg=self.cfg)
+        self.net = GaussNet2(cfg=self.cfg)
 
         # self.net.apply(self.weight_init)
         self.net = self.net.to(self.device)
 
         ## criterion
         self.softiou = SoftLoULoss()
-        # self.mse = torch.nn.MSELoss()
+        # self.recov_loss = ImageRecoverLoss(self.cfg["multiscale_recov_loss_weight"])
+        self.mse = torch.nn.MSELoss()
 
         ## lr scheduler
         self.scheduler = LR_Scheduler_Head(
@@ -159,6 +160,7 @@ class Trainer(object):
         # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=args.learning_rate,
         #                                  momentum=0.9, weight_decay=1e-4)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=args.lr)
+
 
         ## evaluation metrics
         self.metric = SegmentationMetricTPFNFP(nclass=1)
@@ -181,28 +183,32 @@ class Trainer(object):
     def training(self):
         # training step
         start_time = time.time()
-        # base_log = "Epoch-Iter: [{:d}/{:d}]-[{:d}/{:d}] || Lr: {:.6f} || Loss: {:.4f}={:.4f}+{:.4f} || " \
-        #            "Cost Time: {} || Estimated Time: {}"
-        base_log = (
-            "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}] || Lr: {:.6f} || Loss: {:.4f} || "
-            "Cost Time: {} || Estimated Time: {}"
-        )
+        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} || Loss: {:.4f}={:.4f}+{:.4f} || " \
+                   "Cost Time: {} || Estimated Time: {}"
+        # base_log = (
+        #     "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}] || Lr: {:.6f} || Loss: {:.4f} || "
+        #     "Cost Time: {} || Estimated Time: {}"
+        # )
 
         for epoch in range(args.epochs):
             for i, (data, labels) in enumerate(self.train_data_loader):
                 data = data.to(self.device)
                 labels = labels.to(self.device)
 
-                y_hat = self.net(data)
+                # generP, target = self.net(data)
+                target = self.net(data)
 
                 labels = (labels > 0.5).type(torch.float32)
-                loss_softiou = self.softiou(y_hat, labels)
-                # gamma = torch.Tensor([0.1]).to(self.device)
-                # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
+                loss_softiou = self.softiou(target, labels)
+                # loss_img_recov = self.recov_loss(generP, data)
+                # loss_img_recov = self.mse(generP, data)
+                loss_img_recov = torch.tensor([0.0]).to(self.device)
+
+                loss_all = loss_softiou + loss_img_recov
 
                 self.optimizer.zero_grad()
-                loss_softiou.backward()
-                # loss_all.backward()
+                # loss_softiou.backward()
+                loss_all.backward()
                 self.optimizer.step()
 
                 self.iter_num += 1
@@ -211,8 +217,8 @@ class Trainer(object):
                 eta_seconds = ((time.time() - start_time) / self.iter_num) * (self.max_iter - self.iter_num)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-                # self.writer.add_scalar('Train Loss/Loss All', np.mean(loss_all.item()), self.iter_num)
-                self.writer.add_scalar("Train Loss/Loss SoftIoU", np.mean(loss_softiou.item()), self.iter_num)
+                self.writer.add_scalar('Train Loss/Loss All', np.mean(loss_all.item()), self.iter_num)
+                # self.writer.add_scalar("Train Loss/Loss SoftIoU", np.mean(loss_softiou.item()), self.iter_num)
                 # self.writer.add_scalar('Train Loss/Loss MSE', np.mean(loss_mse.item()), self.iter_num)
                 self.writer.add_scalar(
                     "Learning rate/", trainer.optimizer.param_groups[0]["lr"], self.iter_num
@@ -226,8 +232,7 @@ class Trainer(object):
                             self.iter_num % self.iter_per_epoch,
                             self.iter_per_epoch,
                             self.optimizer.param_groups[0]["lr"],
-                            #  loss_all.item(), loss_softiou.item(), loss_mse.item(),
-                            loss_softiou.item(),
+                            loss_all.item(), loss_softiou.item(), loss_img_recov.item(),
                             cost_string,
                             eta_string,
                         )
@@ -246,9 +251,10 @@ class Trainer(object):
         # base_log = "Data: {:s}, mIoU: {:.4f}/{:.4f}, F1: {:.4f}/{:.4f}, Pd:{:.4f}, Fa:{:.8f} "
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
-                y_hat = self.net(data.to(self.device))
+                # generP, target = self.net(data.to(self.device))
+                target = self.net(data.to(self.device))
             # out_D, out_T = out_D.cpu(), out_T.cpu()
-            out_T = y_hat.cpu()
+            out_T = target.cpu()
 
             # loss_softiou = self.softiou(out_T, labels)
             # loss_mse = self.mse(out_D, data)
