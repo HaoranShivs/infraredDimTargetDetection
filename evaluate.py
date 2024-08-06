@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 # from models import get_model
 from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet
+from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet, GaussNet3
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -77,7 +77,7 @@ class Evaluate(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = GaussNet(cfg=self.cfg)
+        self.net = GaussNet3(cfg=self.cfg)
 
         ## load_model
         model_path = osp.join(args.model_path, 'best.pkl')

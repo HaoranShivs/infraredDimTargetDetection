@@ -1,12 +1,12 @@
 resconv_outchannel: 16
 multiscalefeature_outchannel: 
-  - 32
-  - 48
-  - 64
+- 32
+- 64
+- 128
 gauss_sigma: 0.6
 gauss_tempreture: 2.5
 featurefusion_outchannel: 32
 noise_filter_threshold: 0.1
 background_aug_threshold: 0.5
 multiscale_recov_loss_weight: 
-  - 1
+- 1
