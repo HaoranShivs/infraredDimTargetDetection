@@ -10,8 +10,8 @@ class GaussianConv2d(nn.Module):
     def __init__(self, in_channel, kernel_size, sigma=0.6):
         super(GaussianConv2d, self).__init__()
         padding = kernel_size // 2
-        self.tempreture = nn.Parameter(torch.tensor([2.5]).repeat(1, in_channel, 1, 1))
-        self.bias = nn.Parameter(torch.tensor([0.0]).repeat(1, in_channel, 1, 1)) b 
+        self.tempreture = nn.Parameter(torch.tensor([5.0]).repeat(1, in_channel, 1, 1))
+        self.bias = nn.Parameter(torch.tensor([0.5]).repeat(1, in_channel, 1, 1))
 
         # 创建高斯核
         kernel = gaussian_kernel(kernel_size, sigma)
