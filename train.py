@@ -211,6 +211,10 @@ class Trainer(object):
                 loss_all.backward()
                 self.optimizer.step()
 
+                # for name, param in self.net.named_parameters():
+                #     if "multiscalef.pyramid.0.conv1.conv2d.weight" in name:
+                #         self.logger.info(f"{name} 's grad: {param.grad} at epoch {epoch}, step {i}")
+
                 self.iter_num += 1
 
                 cost_string = str(datetime.timedelta(seconds=int(time.time() - start_time)))

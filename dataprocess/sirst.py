@@ -9,12 +9,37 @@ import os
 import os.path as osp
 
 # import sys
-# import random
+import random
 # import scipy.io as scio
 from scipy.signal import convolve2d
 import numpy as np
 
 __all__ = ["SirstAugDataset", "IRSTD1kDataset", "NUDTDataset"]
+
+
+class Rotate_4D_Transform:
+    def __init__(self):
+        self.angles = [0, 90, 180, 270]
+
+    def __call__(self, img):
+        random_idx = torch.randint(0, 1000, (1,))
+        
+        angle = self.angles[random_idx%4]
+        rotated_img = self.__rotate__(img, angle)
+        return rotated_img
+    
+    def __rotate__(self, img, angle):
+        C, _, _ = img.shape
+        if angle == 90:
+            img = torch.transpose(img, -1, -2)
+            img = torch.flip(img, dims=(-1,)) 
+        elif angle == 180:
+            img = torch.flip(img, dims=(-1, -2))
+        elif angle == 270:
+            img = torch.transpose(img, -1, -2)
+            img = torch.flip(img, dims=(-2,))
+        return img
+        
 
 # class SirstAugDataset(Data.Dataset):
 #     '''
@@ -97,17 +122,21 @@ class IRSTD1kDataset(Data.Dataset):
             if filename.endswith("png"):
                 self.names.append(filename)
 
-        self.augment = transforms.Compose(
-            [
-                transforms.RandomRotation(30),
-                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=0),
+        if mode == "test":
+            self.augment = transforms.Compose([
+                    transforms.RandomCrop(base_size),
+                    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+                    transforms.RandomHorizontalFlip(),  # 随机水平翻转
+                    Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
+                ])
+        else:
+            self.augment = transforms.Compose([
                 transforms.RandomResizedCrop(
                     base_size,
-                    scale=(0.8, 1.0)
-                ),  # 在给定的scale范围内随机缩放并裁剪
+                    scale=(0.8, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
+                transforms.RandomAffine(degrees=180, translate=(0.1, 0.1), shear=0),
                 transforms.RandomHorizontalFlip(),  # 随机水平翻转
-            ]
-        )
+            ])
 
     def __getitem__(self, i):
         name = self.names[i]
@@ -126,9 +155,9 @@ class IRSTD1kDataset(Data.Dataset):
 
         data_aug = data_aug / 255.0
 
-        if self.mask_blurred:
-            mask = gaussian_filter(np.array(data_aug[1]), sigma=1, kernel_size=5)
-            data_aug[1] = torch.from_numpy(mask)
+        # if self.mask_blurred:
+        #     mask = gaussian_filter(np.array(data_aug[1]), sigma=1, kernel_size=5)
+        #     data_aug[1] = torch.from_numpy(mask)
         data_aug = data_aug.unsqueeze(1)
         return data_aug[0], data_aug[1]
 
@@ -164,16 +193,22 @@ class NUDTDataset(Data.Dataset):
             if filename.endswith("png"):
                 self.names.append(filename)
 
-        self.augment = transforms.Compose(
-            [
-                transforms.RandomRotation(30),
-                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=0),
+        if mode == "test":
+            self.augment = transforms.Compose([
+                    transforms.RandomCrop(base_size),
+                    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+                    transforms.RandomHorizontalFlip(),  # 随机水平翻转
+                    Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
+                ])
+        else:
+            self.augment = transforms.Compose([
                 transforms.RandomResizedCrop(
-                    base_size, scale=(0.8, 1.0)
+                    base_size,
+                    scale=(0.8, 1.0)
                 ),  # 在给定的scale范围内随机缩放并裁剪
+                transforms.RandomAffine(degrees=180, translate=(0.1, 0.1), shear=0),
                 transforms.RandomHorizontalFlip(),  # 随机水平翻转
-            ]
-        )
+            ])
 
     def __getitem__(self, i):
         name = self.names[i]

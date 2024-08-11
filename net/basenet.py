@@ -10,8 +10,8 @@ class GaussianConv2d(nn.Module):
     def __init__(self, in_channel, kernel_size, sigma=0.6):
         super(GaussianConv2d, self).__init__()
         padding = kernel_size // 2
-        self.tempreture = nn.Parameter(torch.tensor([5.0]).repeat(1, in_channel, 1, 1))
-        self.bias = nn.Parameter(torch.tensor([0.5]).repeat(1, in_channel, 1, 1))
+        self.tempreture = nn.Parameter(torch.randn((1, in_channel, 1, 1))+2.5)
+        self.bias = nn.Parameter(torch.randn((1, in_channel, 1, 1)))
 
         # 创建高斯核
         kernel = gaussian_kernel(kernel_size, sigma)
@@ -22,8 +22,8 @@ class GaussianConv2d(nn.Module):
         self.atten.weight.data = kernel  # 设置权重
         self.atten.weight.requires_grad = False  # 不需要梯度更新
 
-        # # Gauss saliency
-        # self.sigmoid = nn.Sigmoid()
+        # Gauss saliency
+        self.sigmoid = nn.Sigmoid()
 
 
     def forward(self, f):
@@ -32,9 +32,9 @@ class GaussianConv2d(nn.Module):
         f = f.view(B * C, 1, H, W)
         atten = self.atten(f)   # (-1,1)
         atten = atten.view(B, C, H, W)
-        # res = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
-        atten = atten * self.tempreture + self.bias
-        return torch.abs(atten)   # return positive attention (B, 1, H, W)
+        res = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
+        # atten = atten * self.tempreture + self.bias
+        return torch.abs(res)   # return positive attention (B, 1, H, W)
 
 
 class Conv2d_Bn_Relu(nn.Module):
@@ -88,7 +88,7 @@ class ResBlock(nn.Module):
         return x
 
 class Gauss_ResBlock(nn.Module):
-    def __init__(self, in_channel: int = 32, out_channel: int = 32, kernel_size: int = 3, stride: int = 1, gauss_sigma=0.6):
+    def __init__(self, in_channel, out_channel, kernel_size: int = 3, stride: int = 1, gauss_sigma=0.6):
         super(Gauss_ResBlock, self).__init__()
 
         self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
@@ -130,12 +130,12 @@ class Resconv(nn.Module):
         return x
 
 class Gauss_Resconv(nn.Module):
-    def __init__(self, in_channel=1, out_channel=32, gauss_sigma=0.6, down_sampler=None):
+    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, down_sampler=None):
         super(Gauss_Resconv, self).__init__()
 
-        self.block1 = Gauss_ResBlock(in_channel, out_channel, gauss_sigma=gauss_sigma)
-        self.block2 = Gauss_ResBlock(out_channel, out_channel, gauss_sigma=gauss_sigma)
-        self.block3 = Gauss_ResBlock(out_channel, out_channel, gauss_sigma=gauss_sigma)
+        self.block1 = Gauss_ResBlock(in_channel, out_channel/4, gauss_sigma=gauss_sigma)
+        self.block2 = Gauss_ResBlock(out_channel/4, out_channel/2, gauss_sigma=gauss_sigma)
+        self.block3 = Gauss_ResBlock(out_channel/2, out_channel, gauss_sigma=gauss_sigma)
 
         self.down_sampler = down_sampler
 
@@ -212,7 +212,7 @@ class Conv2d_with_Gauss2(nn.Module):
         self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
         # attention
         self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
-        self.conv2 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
+        self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
         self.downsampler = downsampler
 
     def forward(self, shallow_feature):
