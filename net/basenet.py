@@ -20,10 +20,10 @@ class GaussianConv2d(nn.Module):
         # 创建Gauss卷积层
         self.atten = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
         self.atten.weight.data = kernel  # 设置权重
-        self.atten.weight.requires_grad = False  # 不需要梯度更新
+        # self.atten.weight.requires_grad = False  # 不需要梯度更新
 
-        # Gauss saliency
-        self.sigmoid = nn.Sigmoid()
+        # # Gauss saliency
+        # self.sigmoid = nn.Sigmoid()
 
 
     def forward(self, f):
@@ -32,16 +32,16 @@ class GaussianConv2d(nn.Module):
         f = f.view(B * C, 1, H, W)
         atten = self.atten(f)   # (-1,1)
         atten = atten.view(B, C, H, W)
-        res = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
-        # atten = atten * self.tempreture + self.bias
-        return torch.abs(res)   # return positive attention (B, 1, H, W)
+        # atten = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
+        atten = atten * self.tempreture + self.bias
+        return torch.abs(atten)   # return positive attention (B, 1, H, W)
 
 
 class Conv2d_Bn_Relu(nn.Module):
     def __init__(
         self,
-        in_channel: int = 32,
-        out_channel: int = 32,
+        in_channel: int,
+        out_channel: int,
         kernel_size: int = 3,
         stride: int = 1,
         padding: int = 0,
@@ -97,12 +97,13 @@ class Gauss_ResBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, 1, 1)
         self.bn2 = nn.BatchNorm2d(out_channel)
         self.relu2 = nn.ReLU()
+        self.conv3 = Conv2d_Bn_Relu(in_channel, out_channel, 1, 1)
 
     def forward(self, shallow_feature):
         f = self.conv1(shallow_feature)
         atten = self.gauss(f)
-        deep_feature = self.bn2(self.conv2(f * atten))
-        deep_feature = self.relu2(deep_feature + shallow_feature)
+        deep_feature = self.bn2(self.conv2(f + atten))
+        deep_feature = self.relu2(deep_feature + self.conv3(shallow_feature))
         return deep_feature
 
 
@@ -133,9 +134,9 @@ class Gauss_Resconv(nn.Module):
     def __init__(self, in_channel, out_channel, gauss_sigma=0.6, down_sampler=None):
         super(Gauss_Resconv, self).__init__()
 
-        self.block1 = Gauss_ResBlock(in_channel, out_channel/4, gauss_sigma=gauss_sigma)
-        self.block2 = Gauss_ResBlock(out_channel/4, out_channel/2, gauss_sigma=gauss_sigma)
-        self.block3 = Gauss_ResBlock(out_channel/2, out_channel, gauss_sigma=gauss_sigma)
+        self.block1 = Gauss_ResBlock(in_channel, int(out_channel/4), gauss_sigma=gauss_sigma)
+        self.block2 = Gauss_ResBlock(int(out_channel/4), int(out_channel/2), gauss_sigma=gauss_sigma)
+        self.block3 = Gauss_ResBlock(int(out_channel/2), out_channel, gauss_sigma=gauss_sigma)
 
         self.down_sampler = down_sampler
 
@@ -611,6 +612,36 @@ class GaussNet3(nn.Module):
 
         downsampler1 = nn.MaxPool2d(3, 2, 1)
         self.resconv = Resconv(in_channel, cfg["resconv_outchannel"], downsampler1)
+
+        downsampler2 = nn.MaxPool2d(2, 2)
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"],
+            cfg["multiscalefeature_outchannel"],
+            1,
+            cfg,
+            downsampler2,
+        )
+        self.ffusion = FusionNet_upscale(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
+
+    def forward(self, img):
+        x = self.resconv(img)
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        target = self.detect(xf1)
+        return target
+
+
+class GaussNet4(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(GaussNet4, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        downsampler1 = nn.MaxPool2d(3, 2, 1)
+        self.resconv = Gauss_Resconv(in_channel, cfg["resconv_outchannel"], cfg["gauss_sigma"], downsampler1)
 
         downsampler2 = nn.MaxPool2d(2, 2)
         self.multiscalef = MultiScaleFeatureNet(

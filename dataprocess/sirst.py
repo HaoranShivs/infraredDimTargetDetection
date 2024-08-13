@@ -124,7 +124,9 @@ class IRSTD1kDataset(Data.Dataset):
 
         if mode == "test":
             self.augment = transforms.Compose([
-                    transforms.RandomCrop(base_size),
+                    transforms.RandomResizedCrop(
+                    base_size,
+                    scale=(0.8, 1.0)),
                     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
                     transforms.RandomHorizontalFlip(),  # 随机水平翻转
                     Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
@@ -195,7 +197,9 @@ class NUDTDataset(Data.Dataset):
 
         if mode == "test":
             self.augment = transforms.Compose([
-                    transforms.RandomCrop(base_size),
+                    transforms.RandomResizedCrop(
+                    base_size,
+                    scale=(0.8, 1.0)),
                     transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
                     transforms.RandomHorizontalFlip(),  # 随机水平翻转
                     Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270

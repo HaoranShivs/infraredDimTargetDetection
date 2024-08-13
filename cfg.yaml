@@ -3,8 +3,8 @@ multiscalefeature_outchannel:
 - 32
 - 48
 - 64
-- 64
-- 64
+- 128
+- 256
 gauss_sigma: 0.6
 gauss_tempreture: 2.5
 featurefusion_outchannel: 32
