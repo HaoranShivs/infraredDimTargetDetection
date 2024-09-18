@@ -104,8 +104,8 @@ class IRSTD1kDataset(Data.Dataset):
         self,
         base_dir=r"W:/DataSets/Infraid_datasets/IRSTD-1k",
         mode="train",
-        mask_blurred=False,
         base_size=256,
+        cfg=None
     ):
         assert mode in ["train", "test"]
 
@@ -115,8 +115,8 @@ class IRSTD1kDataset(Data.Dataset):
             self.data_dir = osp.join(base_dir, "test")
         else:
             raise NotImplementedError
+        self.cfg = cfg
         self.base_size = base_size
-        self.mask_blurred = mask_blurred
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
@@ -127,7 +127,7 @@ class IRSTD1kDataset(Data.Dataset):
                     transforms.RandomResizedCrop(
                     base_size,
                     scale=(0.8, 1.0)),
-                    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+                    transforms.RandomAffine(degrees=0, translate=(0.3, 0.3)),
                     transforms.RandomHorizontalFlip(),  # 随机水平翻转
                     Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
                 ])
@@ -136,8 +136,9 @@ class IRSTD1kDataset(Data.Dataset):
                 transforms.RandomResizedCrop(
                     base_size,
                     scale=(0.8, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
-                transforms.RandomAffine(degrees=180, translate=(0.1, 0.1), shear=0),
+                transforms.RandomAffine(degrees=0, translate=(0.5, 0.5), shear=0),
                 transforms.RandomHorizontalFlip(),  # 随机水平翻转
+                Rotate_4D_Transform(),
             ])
 
     def __getitem__(self, i):
@@ -147,8 +148,6 @@ class IRSTD1kDataset(Data.Dataset):
 
         img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
 
-        # img = cv2.resize(img, [self.base_size, self.base_size], interpolation=cv2.INTER_LINEAR)
-        # mask = cv2.resize(mask, [self.base_size, self.base_size], interpolation=cv2.INTER_NEAREST)
         img = torch.from_numpy(img).type(torch.FloatTensor)
         mask = torch.from_numpy(mask).type(torch.FloatTensor)
         data = torch.cat((img.unsqueeze(0), mask.unsqueeze(0)), dim=0)
@@ -157,10 +156,8 @@ class IRSTD1kDataset(Data.Dataset):
 
         data_aug = data_aug / 255.0
 
-        # if self.mask_blurred:
-        #     mask = gaussian_filter(np.array(data_aug[1]), sigma=1, kernel_size=5)
-        #     data_aug[1] = torch.from_numpy(mask)
         data_aug = data_aug.unsqueeze(1)
+
         return data_aug[0], data_aug[1]
 
     def __len__(self):

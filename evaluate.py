@@ -14,8 +14,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # from models import get_model
-from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet, GaussNet3, GaussNet4
+# from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
+from dataprocess.croped_sirst import Crop_IRSTD1kDataset, Crop_NUDTDataset
+# from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet, GaussNet3, GaussNet4, SigmoidNet
+from net.twotasknet import LocalSegment
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -60,15 +62,25 @@ class Evaluate(object):
             self.cfg = yaml.safe_load(f)
 
         ## dataset
-        if args.dataset == 'nudt':
-            valset = NUDTDataset(base_dir=r'W:/DataSets/ISTD/NUDT-SIRST', mode='test', base_size=args.base_size)
-        # elif args.dataset == 'sirstaug':
-        #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
-        #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
-        #     valset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
-        #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
-        elif args.dataset == 'irstd1k':
-            valset = IRSTD1kDataset(base_dir=r'W:/DataSets/ISTD/IRSTD-1k', mode='test', base_size=args.base_size) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
+        # if args.dataset == 'nudt':
+        #     valset = NUDTDataset(base_dir=r'W:/DataSets/ISTD/NUDT-SIRST', mode='test', base_size=args.base_size)
+        # # elif args.dataset == 'sirstaug':
+        # #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
+        # #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
+        # #     valset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
+        # #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
+        # elif args.dataset == 'irstd1k':
+        #     valset = IRSTD1kDataset(base_dir=r'W:/DataSets/ISTD/IRSTD-1k', mode='test', base_size=args.base_size) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
+        # else:
+        #     raise NotImplementedError
+        if args.dataset == "irstd1k":
+            valset = Crop_IRSTD1kDataset(
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size
+            )
+        elif args.dataset == "nudt":
+            valset = Crop_NUDTDataset(
+                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size
+            )
         else:
             raise NotImplementedError
 
@@ -80,7 +92,7 @@ class Evaluate(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = GaussNet4(cfg=self.cfg)
+        self.net = LocalSegment(cfg=self.cfg)
 
         ## load_model
         model_path = osp.join(args.model_path, 'best.pkl')

@@ -15,7 +15,7 @@ def hide_channels(out_channel:int, num:int):
     return res
 
 
-def gaussian_kernel(kernel_size, sigma):
+def gaussian_kernel(channel, kernel_size, sigma):
     """创建一个高斯核"""
     # 创建一个一维高斯核
     kernel_1d = torch.Tensor([math.exp(-z ** 2.0 / (2 * sigma ** 2)) for z in range(-kernel_size // 2 + 1, kernel_size // 2 + 1)])
@@ -24,4 +24,8 @@ def gaussian_kernel(kernel_size, sigma):
     # 归一化
     kernel_2d /= kernel_2d.sum()
     kernel_2d[kernel_size // 2, kernel_size // 2] = -kernel_2d[kernel_size // 2, kernel_size // 2]
-    return kernel_2d
+    # 整个卷积核参数
+    params = torch.zeros((channel, channel, kernel_size, kernel_size))
+    for i in range(channel):
+        params[i, i] = kernel_2d
+    return params

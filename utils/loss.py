@@ -39,6 +39,33 @@ class SoftIoUL1NromLoss(nn.Module):
         return loss
 
 
+def downsampleImg(img, cfg_dict):
+    downsampler = nn.MaxPool2d(2, 2)
+
+    downsampled_imgs = []
+    downsampled_img = img
+
+    for i in range(len(cfg_dict["multiscalefeature_outchannel"]), 0, -1):
+        downsampled_img = downsampler(downsampled_img)
+        if i <= 3:
+            downsampled_imgs.append(downsampled_img)
+    
+    return downsampled_imgs
+
+
+class Heatmap_SoftIoU(nn.Module):
+    def __init__(self):
+        super(Heatmap_SoftIoU, self).__init__()
+        self.softIouLoss = SoftLoULoss()
+
+    def forward(self, pred, target):
+        loss1 = self.softIouLoss(pred[0], target[2])
+        loss2 = self.softIouLoss(pred[1], target[1])
+        loss3 = self.softIouLoss(pred[2], target[0])
+        loss = (loss1 + loss2 + loss3) / 3 
+        return loss
+
+
 class ImageRecoverLoss(nn.Module):
     def __init__(self, loss_weight_per_scale):
         super(ImageRecoverLoss, self).__init__()

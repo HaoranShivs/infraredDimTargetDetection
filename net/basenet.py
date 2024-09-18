@@ -5,36 +5,82 @@ from net.utils import hide_channels, gaussian_kernel
 
 
 class GaussianConv2d(nn.Module):
-    """only work for data distributed in [-a, a]"""
-
     def __init__(self, in_channel, kernel_size, sigma=0.6):
         super(GaussianConv2d, self).__init__()
         padding = kernel_size // 2
-        self.tempreture = nn.Parameter(torch.randn((1, in_channel, 1, 1))+2.5)
+        self.tempreture = nn.Parameter(torch.randn((1, in_channel, 1, 1)) + 2.5)
         self.bias = nn.Parameter(torch.randn((1, in_channel, 1, 1)))
 
         # 创建高斯核
-        kernel = gaussian_kernel(kernel_size, sigma)
-        kernel = kernel.unsqueeze(0).unsqueeze(0)  # 添加通道维度
- 
+        kernel = gaussian_kernel(in_channel, kernel_size, sigma)  # (channel, channel, kernelsize, kernelsize)
+        # kernel = kernel.unsqueeze(0).unsqueeze(0)  # 添加通道维度
+
         # 创建Gauss卷积层
-        self.atten = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+        self.atten = nn.Conv2d(in_channel, in_channel, kernel_size, padding=padding, bias=False)
         self.atten.weight.data = kernel  # 设置权重
-        # self.atten.weight.requires_grad = False  # 不需要梯度更新
+        self.atten.weight.requires_grad = False  # 不需要梯度更新
 
         # # Gauss saliency
         # self.sigmoid = nn.Sigmoid()
 
+    def forward(self, f):
+        # img = self.recov(input) # (B, 1, H, W)
+        # B, C, H, W = f.shape
+        # f = f.view(B * C, 1, H, W)
+        atten = self.atten(f)  # (-1,1)
+        # atten = atten.view(B, C, H, W)
+        # atten = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
+        atten = torch.abs(atten * self.tempreture) + self.bias
+        return atten  # return positive attention (B, C, H, W)
+
+
+class GaussianConv2d2(nn.Module):
+    def __init__(self, in_channel, kernel_size, sigma=0.6):
+        super(GaussianConv2d2, self).__init__()
+        padding = kernel_size // 2
+        self.kernel_size = kernel_size
+
+        # 参数
+        self.sigma = nn.Parameter(torch.ones((kernel_size, kernel_size))*sigma)
+        self.bias = nn.Parameter(torch.randn((kernel_size, kernel_size))-0.1)
+
+        # 创建Gauss卷积层
+        self.atten = nn.Conv2d(1, 9, kernel_size, padding=padding, bias=False)
+        
+        self.conv = Conv2d_Bn_Relu(in_channel * 2, in_channel, 3, 1, 1)
+
+        # # Gauss saliency
+        # self.sigmoid = nn.Sigmoid()
+
+    def __set_kernel__(self):
+        for i in range(self.kernel_size):
+            for j in range(self.kernel_size):
+                x = torch.arange(0, self.kernel_size, 1, dtype=torch.float32, device=self.sigma.device) - i
+                y = torch.arange(0, self.kernel_size, 1, dtype=torch.float32, device=self.sigma.device) - j
+                kernel_1d_x = torch.exp(-(x**2) / (2 * self.sigma[i,j]**2))
+                kernel_1d_y = torch.exp(-(y**2) / (2 * self.sigma[i,j]**2))
+                kernel_2d = torch.outer(kernel_1d_x, kernel_1d_y)
+                # 归一化
+                kernel_2d /= kernel_2d.sum()
+                # 产生正负值
+                kernel_2d -= self.bias[i, j]
+                # 赋值
+                self.atten.weight.data[i*self.kernel_size+j, 0] = kernel_2d
 
     def forward(self, f):
         # img = self.recov(input) # (B, 1, H, W)
+        self.__set_kernel__()
         B, C, H, W = f.shape
         f = f.view(B * C, 1, H, W)
-        atten = self.atten(f)   # (-1,1)
-        atten = atten.view(B, C, H, W)
+        score = self.atten(f)  # (-1,1), (B*C, kernel_num, H, W)
+        score = torch.sum(score, dim=1, keepdim=True) # (B*C, 1, H, W)
+        score = score.view(B, C, H, W)
+        atten = torch.cat((score, f.view(B, C, H, W)), dim=1)
+        atten = self.conv(atten)    # (B, C, H, W)
+
         # atten = self.sigmoid(atten * self.tempreture + self.bias) * 2 - 1
-        atten = atten * self.tempreture + self.bias
-        return torch.abs(atten)   # return positive attention (B, 1, H, W)
+        # atten = torch.abs(atten)
+        return atten  # return positive attention (B, C, H, W)
 
 
 class Conv2d_Bn_Relu(nn.Module):
@@ -67,33 +113,33 @@ class ResBlock(nn.Module):
         stride: int = 1,
     ):
         super(ResBlock, self).__init__()
-        self.conv2d1 = nn.Conv2d(in_channel, out_channel, kernel_size, stride, 1)
-        self.conv2d2 = nn.Conv2d(out_channel, out_channel, kernel_size, stride, 1)
-        # self.conv2d3 = nn.Conv2d(out_channel, out_channel, 1, 1)
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size, stride, 1)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, stride, 1)
         self.bn1 = nn.BatchNorm2d(out_channel)
         self.bn2 = nn.BatchNorm2d(out_channel)
-        # self.bn3 = nn.BatchNorm2d(out_channel)
         self.relu = nn.ReLU()
+        self.conv3 = Conv2d_Bn_Relu(in_channel, out_channel, 1, 1)
 
     def forward(self, inputs):
-        x = self.conv2d1(inputs)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.conv2d2(x)
-        x = self.bn2(x)
+        x = self.relu(self.bn1(self.conv1(inputs)))
+        x = self.bn2(self.conv2(x))
         # x = self.relu(x)
         # x = self.bn3(self.conv2d3(x))
-        x = x + inputs
+        x = x + self.conv3(inputs)
         x = self.relu(x)
         return x
 
+
 class Gauss_ResBlock(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size: int = 3, stride: int = 1, gauss_sigma=0.6):
+    def __init__(
+        self, in_channel, out_channel, kernel_size: int = 3, stride: int = 1, gauss_kernelsize=3, gauss_sigma=0.6
+    ):
         super(Gauss_ResBlock, self).__init__()
 
         self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, kernel_size, stride, 1)
         # attention
-        self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
+        # self.gauss = GaussianConv2d(out_channel, gauss_kernelsize, gauss_sigma)
+        self.gauss = GaussianConv2d2(gauss_kernelsize, gauss_sigma)
         self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, 1, 1)
         self.bn2 = nn.BatchNorm2d(out_channel)
         self.relu2 = nn.ReLU()
@@ -111,9 +157,9 @@ class Resconv(nn.Module):
     def __init__(self, in_channel=1, out_channel=32, down_sampler=None):
         super(Resconv, self).__init__()
 
-        self.block1 = ResBlock(in_channel, out_channel)
-        self.block2 = ResBlock(out_channel, out_channel)
-        self.block3 = ResBlock(out_channel, out_channel)
+        self.block1 = ResBlock(in_channel, int(out_channel / 4))
+        self.block2 = ResBlock(int(out_channel / 4), int(out_channel / 2))
+        self.block3 = ResBlock(int(out_channel / 2), out_channel)
 
         self.down_sampler = down_sampler
 
@@ -129,14 +175,15 @@ class Resconv(nn.Module):
         x = self.block3(x)
         x = self.down_sampler(x) if self.down_sampler is not None else x
         return x
+
 
 class Gauss_Resconv(nn.Module):
-    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, down_sampler=None):
+    def __init__(self, in_channel, out_channel, gauss_kernelsize=3, gauss_sigma=0.6, down_sampler=None):
         super(Gauss_Resconv, self).__init__()
 
-        self.block1 = Gauss_ResBlock(in_channel, int(out_channel/4), gauss_sigma=gauss_sigma)
-        self.block2 = Gauss_ResBlock(int(out_channel/4), int(out_channel/2), gauss_sigma=gauss_sigma)
-        self.block3 = Gauss_ResBlock(int(out_channel/2), out_channel, gauss_sigma=gauss_sigma)
+        self.block1 = Gauss_ResBlock(in_channel, int(out_channel / 4), 3, 1, gauss_kernelsize, gauss_sigma)
+        self.block2 = Gauss_ResBlock(int(out_channel / 4), int(out_channel / 2), 3, 1, gauss_kernelsize, gauss_sigma)
+        self.block3 = Gauss_ResBlock(int(out_channel / 2), out_channel, 3, 1, gauss_kernelsize, gauss_sigma)
 
         self.down_sampler = down_sampler
 
@@ -154,7 +201,7 @@ class Gauss_Resconv(nn.Module):
         return x
 
 
-class ShallowFeatureExtractor(nn.Module):
+class ShallowFeatureExtractor(nn.Module):  
     def __init__(
         self,
         in_channel: int = 32,
@@ -205,7 +252,8 @@ class Conv2d_with_Gauss(nn.Module):
         atten = self.gauss(shallow_feature)
         deep_feature = self.conv(shallow_feature * atten)
         return deep_feature
-    
+
+
 class Conv2d_with_Gauss2(nn.Module):
     def __init__(self, in_channel, out_channel, gauss_sigma=0.6, downsampler=None):
         super(Conv2d_with_Gauss2, self).__init__()
@@ -222,14 +270,16 @@ class Conv2d_with_Gauss2(nn.Module):
         deep_feature = self.conv2(f * atten)
         deep_feature = self.downsampler(deep_feature) if self.downsampler is not None else deep_feature
         return deep_feature
-    
+
+
 class Conv2d_with_Gauss3(nn.Module):
-    def __init__(self, in_channel, out_channel, gauss_sigma=0.6, downsampler=None):
+    def __init__(self, in_channel, out_channel, gauss_kernelsize=3, gauss_sigma=0.6, downsampler=None):
         super(Conv2d_with_Gauss3, self).__init__()
 
         self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
         # attention
-        self.gauss = GaussianConv2d(out_channel, 3, gauss_sigma)
+        # self.gauss = GaussianConv2d(out_channel, gauss_kernelsize, gauss_sigma)
+        self.gauss = GaussianConv2d2(out_channel, gauss_kernelsize, gauss_sigma)
         self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
         self.downsampler = downsampler
 
@@ -237,6 +287,24 @@ class Conv2d_with_Gauss3(nn.Module):
         f = self.conv1(shallow_feature)
         atten = self.gauss(f)
         deep_feature = self.conv2(f + atten)
+        deep_feature = self.downsampler(deep_feature) if self.downsampler is not None else deep_feature
+        return deep_feature
+
+
+class Conv2dwithSigmoid(nn.Module):
+    def __init__(self, in_channel, out_channel, downsampler=None):
+        super(Conv2dwithSigmoid, self).__init__()
+
+        self.conv1 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
+        # attention
+        self.atten = nn.Sigmoid()
+        self.conv2 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
+        self.downsampler = downsampler
+
+    def forward(self, shallow_feature):
+        f = self.conv1(shallow_feature)
+        atten = self.atten(f)
+        deep_feature = self.conv2(f * atten)
         deep_feature = self.downsampler(deep_feature) if self.downsampler is not None else deep_feature
         return deep_feature
 
@@ -261,18 +329,25 @@ class UpScaler(nn.Module):
 
 
 class MultiScaleFeatureNet(nn.Module):
-    def __init__(self, in_channel, out_channel_list, gauss=False, cfg=None, downsampler=None):
+    def __init__(self, in_channel, out_channel_list, atten_choice=0, cfg=None, downsampler=None):
         super(MultiScaleFeatureNet, self).__init__()
 
         out_channel_list.insert(0, in_channel)
 
         pyramid_layers = []
         for i in range(1, len(out_channel_list)):
-            if gauss:
+            if atten_choice == 1:
                 layer = Conv2d_with_Gauss3(
                     out_channel_list[i - 1],
                     out_channel_list[i],
+                    cfg["gauss_kernelsize"],
                     cfg["gauss_sigma"],
+                    downsampler,
+                )
+            elif atten_choice == 2:
+                layer = Conv2dwithSigmoid(
+                    out_channel_list[i - 1],
+                    out_channel_list[i],
                     downsampler,
                 )
             else:
@@ -362,7 +437,7 @@ class FusionNet_upscale(nn.Module):
             raise ValueError("inputs of FusionNet is not same with cfg['multiscalefeature_outchannel']")
 
         xd = inputs[len(inputs) - 1]
-        for i in range(0, len(self.SRer)-1):
+        for i in range(0, len(self.SRer) - 1):
             xs = inputs[len(inputs) - 2 - i]
             xd = self.SRer[i](xd, xs)
         res = self.SRer[-1](xd)
@@ -475,7 +550,7 @@ class BaseNet3(nn.Module):
     def forward(self, img):
         x = self.resconv(img)
         outputs_f = self.multiscalef(x)
-        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
         # target = self.detect(xf1, img)
         target = self.detect(xf1)
         return target
@@ -567,7 +642,7 @@ class GaussNet(nn.Module):
     def forward(self, img):
         x = self.resconv(img)
         outputs_f = self.multiscalef(x)
-        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
         # target = self.detect(xf1, img)
         target = self.detect(xf1)
         return target
@@ -598,7 +673,7 @@ class GaussNet2(nn.Module):
     def forward(self, img):
         x = self.resconv(img)
         outputs_f = self.multiscalef(x)
-        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
         # target = self.detect(xf1, img)
         target = self.detect(xf1)
         return target
@@ -629,7 +704,7 @@ class GaussNet3(nn.Module):
     def forward(self, img):
         x = self.resconv(img)
         outputs_f = self.multiscalef(x)
-        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
         target = self.detect(xf1)
         return target
 
@@ -641,7 +716,9 @@ class GaussNet4(nn.Module):
             raise ValueError("parameter 'cfg' is not given")
 
         downsampler1 = nn.MaxPool2d(3, 2, 1)
-        self.resconv = Gauss_Resconv(in_channel, cfg["resconv_outchannel"], cfg["gauss_sigma"], downsampler1)
+        self.resconv = Gauss_Resconv(
+            in_channel, cfg["resconv_outchannel"], cfg["gauss_kernelsize"], cfg["gauss_sigma"], downsampler1
+        )
 
         downsampler2 = nn.MaxPool2d(2, 2)
         self.multiscalef = MultiScaleFeatureNet(
@@ -659,7 +736,54 @@ class GaussNet4(nn.Module):
     def forward(self, img):
         x = self.resconv(img)
         outputs_f = self.multiscalef(x)
-        xf1 = self.ffusion([x]+outputs_f)  # (B, 32, 256, 256)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
+        target = self.detect(xf1)
+        return target
+
+
+class GaussNet5(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+         
+        self.ffusion = FusionNet_upscale(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
+
+    def forward(self, img):
+        x = self.resconv(img)
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
+        target = self.detect(xf1)
+        return target
+
+
+class SigmoidNet(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(SigmoidNet, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        downsampler1 = nn.MaxPool2d(3, 2, 1)
+        self.resconv = Resconv(in_channel, cfg["resconv_outchannel"], downsampler1)
+
+        downsampler2 = nn.MaxPool2d(2, 2)
+        self.multiscalef = MultiScaleFeatureNet(
+            cfg["resconv_outchannel"],
+            cfg["multiscalefeature_outchannel"],
+            2,
+            cfg,
+            downsampler2,
+        )
+        self.ffusion = FusionNet_upscale(
+            [cfg["resconv_outchannel"]] + cfg["multiscalefeature_outchannel"], cfg["featurefusion_outchannel"]
+        )
+        self.detect = DetectNet1(cfg["featurefusion_outchannel"], 1)
+
+    def forward(self, img):
+        x = self.resconv(img)
+        outputs_f = self.multiscalef(x)
+        xf1 = self.ffusion([x] + outputs_f)  # (B, 32, 256, 256)
+        # target = self.detect(xf1, img)
         target = self.detect(xf1)
         return target
 
