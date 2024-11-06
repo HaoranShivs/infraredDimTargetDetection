@@ -28,6 +28,7 @@ class SegmentationMetricTPFNFP(object):
     def update(self, labels, preds):
         def evaluate_worker(self, label, pred):
             tp, fp, fn = batch_tp_fp_fn(pred, label, self.nclass)
+            # print(self.total_tp, self.total_fp, self.total_fn)
             with self.lock:
                 self.total_tp += tp
                 self.total_fp += fp
@@ -103,8 +104,10 @@ class my_PD_FA(object):
         self.reset()
 
     def update(self, pred, label):
-        max_pred= np.max(pred)
-        max_label = np.max(label)
+        # max_pred= np.max(pred)
+        # max_label = np.max(label)
+        pred = np.array(pred)
+        label = np.array(label)
         pred = pred / np.max(pred) # normalize output to 0-1
         label = label.astype(np.uint8)
 

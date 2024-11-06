@@ -14,10 +14,12 @@ import matplotlib.pyplot as plt
 
 # from models import get_model
 from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from dataprocess.croped_sirst import Crop_IRSTD1kDataset, Crop_NUDTDataset
-# from net.basenet import BaseNet1, BaseNet2, BaseNet3, LargeBaseNet, LargeBaseNet2, GaussNet, GaussNet2, GaussNet3, GaussNet4, SigmoidNet
-from net.twotasknet import Heatmap_net, LocalSegment, HeatMaptoImg, UnitLabels
-from utils.loss import SoftLoULoss, ImageRecoverLoss, Heatmap_SoftIoU, downsampleImg
+# from dataprocess.croped_sirst import Crop_IRSTD1kDataset, Crop_NUDTDataset
+# from net.basenet import BaseNet1, BaseNet2, BaseNet3, BaseNet4, BaseNetWithLoss, LargeBaseNet, LargeBaseNet2, GaussNet, GaussNet2, GaussNet3, GaussNet4, SigmoidNet
+# from net.basenet import BaseNet4, BaseNetWithLoss
+# from net.twotasknet import Heatmap_net, LocalSegment, HeatMaptoImg, UnitLabels, TwoTaskNetWithLoss
+from net.attentionnet import attenMultiplyUNet_withloss
+from utils.loss import SoftLoULoss, ImageRecoverLoss, Heatmap_SoftIoU, Heatmap_MSE
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
 from utils.logger import setup_logger
@@ -52,6 +54,7 @@ def parse_args():
     # Net parameters
     #
     parser.add_argument("--net-name", type=str, default="rpcanet", help="net name: fcn")
+    parser.add_argument("--model-path", type=str, default="", help="load model path")
     parser.add_argument("--model-path1", type=str, default="", help="load model path")
     parser.add_argument("--model-path2", type=str, default="", help="load model path")
     # Rank parameters
@@ -113,10 +116,10 @@ class Trainer(object):
         # dataset
         if args.dataset == "nudt":
             trainset = NUDTDataset(
-                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size
+                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size, cfg=self.cfg
             )
             valset = NUDTDataset(
-                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size
+                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size, cfg=self.cfg
             )
         # elif args.dataset == 'sirstaug':
         #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
@@ -130,25 +133,11 @@ class Trainer(object):
             valset = IRSTD1kDataset(
                 base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size, cfg=self.cfg
             )
-        # if args.dataset == "irstd1k":
-        #     trainset = Crop_IRSTD1kDataset(
-        #         base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size
-        #     )
-        #     valset = Crop_IRSTD1kDataset(
-        #         base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size
-        #     )
-        # elif args.dataset == "nudt":
-        #     trainset = Crop_NUDTDataset(
-        #         base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size
-        #     )
-        #     valset = Crop_NUDTDataset(
-        #         base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size
-        #     )
         else:
             raise NotImplementedError
 
         self.train_data_loader = Data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
-        self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
+        self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size, shuffle=False, drop_last=False)
         self.iter_per_epoch = len(self.train_data_loader)
         self.max_iter = args.epochs * self.iter_per_epoch
 
@@ -157,21 +146,18 @@ class Trainer(object):
             os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
-        ## model
-        self.net_heatmap = Heatmap_net(cfg=self.cfg)
-
-        self.net_localseg = LocalSegment(cfg=self.cfg)
+        # model
+        # net = BaseNet4(1, self.cfg)
+        # loss_fn = SoftLoULoss()
+        self.net = attenMultiplyUNet_withloss(self.cfg, False)
 
         # self.net.apply(self.weight_init)
-        self.net_heatmap = self.net_heatmap.to(self.device)
-
-        self.net_localseg = self.net_localseg.to(self.device)
+        self.net = self.net.to(self.device)
 
         ## criterion
-        self.heatmap_softiou = Heatmap_SoftIoU()
-        self.softiou = SoftLoULoss()
-        # self.recov_loss = ImageRecoverLoss(self.cfg["multiscale_recov_loss_weight"])
-        # self.mse = torch.nn.MSELoss()
+        # self.heatmap_softiou = Heatmap_SoftIoU(self.cfg)
+        # self.heatmap_mse = Heatmap_MSE(self.cfg)
+        # self.softiou = SoftLoULoss()
 
         ## lr scheduler
         self.scheduler = LR_Scheduler_Head(
@@ -182,7 +168,7 @@ class Trainer(object):
         # self.optimizer = torch.optim.Adagrad(self.net.parameters(), lr=args.learning_rate, weight_decay=1e-4)
         # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=args.learning_rate,
         #                                  momentum=0.9, weight_decay=1e-4)
-        self.optimizer = torch.optim.Adam(list(self.net_heatmap.parameters()) +list( self.net_localseg.parameters()), lr=args.lr)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=args.lr)
         # self.optimizer = torch.optim.Adam(self.net_heatmap.parameters(), lr=args.lr)
 
         ## evaluation metrics
@@ -190,7 +176,7 @@ class Trainer(object):
         self.best_miou = 0
         self.best_fmeasure = 0
         self.best_prec = 0
-        self.best_recall = 1
+        self.best_recall = 0
         self.eval_loss = 0  # tmp values
         self.miou = 0
         self.fmeasure = 0
@@ -208,57 +194,23 @@ class Trainer(object):
     def training(self):
         # training step
         start_time = time.time()
-        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} || Loss: {:.4f}={:.4f}+{:.4f} || " \
+        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f} || " \
                    "Cost Time: {} || Estimated Time: {}"
         for epoch in range(args.epochs):
-            for i, (data, labels) in enumerate(self.train_data_loader):
+            for i, (data, label) in enumerate(self.train_data_loader):
                 data = data.to(self.device)
-                labels = labels.to(self.device)
+                label = label.to(self.device)
+                label = (label > self.cfg["label_vague_threshold"]).type(torch.float32)
 
-                target = self.net_heatmap(data)
-
-                labels = (labels > 0.01).type(torch.float32)
-                multiScale_labels = downsampleImg(labels, self.cfg)
-
-                loss_heatmap = self.heatmap_softiou(target, multiScale_labels)
-
-                multiscale_imgs, bboxs = HeatMaptoImg(target, data, 0.1)
-
-                for i in range(len(multiscale_imgs)-1, -1, -1):
-                    for j in range(len(multiscale_imgs[0])):
-                        for z in range(multiscale_imgs[i][j].shape[0]):
-                            ori_pict = np.array(data.cpu())
-                            ori_pict[j,0, bboxs[i][j][z][0]:bboxs[i][j][z][2], bboxs[i][j][z][1]:bboxs[i][j][z][3]] = 0 
-                            target_pict = np.array(multiscale_imgs[i][j][z].cpu())
-
-                            fig, axes = plt.subplots(2)
-                            axes[0].imshow(ori_pict[j,0], cmap='gray')
-                            axes[0].axis('off')  # 关闭坐标轴显示
-                                
-                            axes[1].imshow(target_pict[0], cmap='gray')
-                            axes[1].axis('off')  # 同样关闭坐标轴显示
-                                # plt.title('Blurred Image')
-                            plt.tight_layout()
-                            plt.show()
-                            a = input()
-                
-                pred = self.net_localseg(multiscale_imgs)
-
-                pred = UnitLabels(pred, bboxs, 256)
-
-                loss_softiou = self.softiou(pred, labels)
-
-                # loss_softiou = torch.tensor([0,], device=loss_heatmap.device)
-                loss_all = loss_softiou + loss_heatmap
+                _, loss_all = self.net(data, label)
 
                 self.optimizer.zero_grad()
-                # loss_softiou.backward()
                 loss_all.backward()
                 self.optimizer.step()
 
                 # for name, param in self.net.named_parameters():
-                #     if "heatmap.heatmaps" in name:
-                #         self.logger.info(f"{name} 's grad: {param.grad} at epoch {epoch}, step {i}")
+                #     if "net.linear" in name:
+                #         print(f"Gradient for {name}: {param.grad}")
 
                 self.iter_num += 1
 
@@ -273,6 +225,7 @@ class Trainer(object):
                     "Learning rate/", trainer.optimizer.param_groups[0]["lr"], self.iter_num
                 )
 
+                loss_softiou, loss_heatmap = torch.tensor([0.,]), torch.tensor([0.,])
                 if self.iter_num % self.args.log_per_iter == 0:
                     self.logger.info(
                         base_log.format(
@@ -288,10 +241,11 @@ class Trainer(object):
                     )
 
                 if self.iter_num % self.iter_per_epoch == 0:
-                    self.net_heatmap.eval()
+                    self.net.eval()
                     self.validation()
-                    self.net_heatmap.train()
+                    self.net.train()
                     self.scheduler(self.optimizer, i, epoch, None)
+
 
     def validation(self):
         self.metric.reset()
@@ -300,44 +254,34 @@ class Trainer(object):
         # base_log = "Data: {:s}, mIoU: {:.4f}/{:.4f}, F1: {:.4f}/{:.4f}, Pd:{:.4f}, Fa:{:.8f} "
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
-                # generP, target = self.net(data.to(self.device))
-                target = self.net_heatmap(data.to(self.device))
-            # out_D, out_T = out_D.cpu(), out_T.cpu()
-            # out_T = target.cpu()
+                # noise = torch.zeros((data.shape[0], 1, 32, 32), device=data.device)
+                pred, _, _ = self.net.net(data.to(self.device))
+            out_T = pred.cpu() 
 
             # loss_softiou = self.softiou(out_T, labels)
             # loss_mse = self.mse(out_D, data)
             # gamma = torch.Tensor([0.1]).to(self.device)
             # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
             
-            labels = (labels > 0.5).type(torch.float32)
-            labels = downsampleImg(labels, self.cfg)
-            miou_all, prec_all, recall_all, fmeasure_all = 0., 0., 0., 0.
-            for i in range(len(labels)):
-                self.metric.update(labels[i], target[2-i].cpu())
-                miou, prec, recall, fmeasure = self.metric.get()
-                miou_all += miou
-                prec_all += prec
-                recall_all += recall
-                fmeasure_all += fmeasure
-            miou_all, prec_all, recall_all, fmeasure_all = miou_all/3, prec_all/3, recall_all/3, fmeasure_all/3
-        torch.save(self.net_heatmap.state_dict(), osp.join(self.args.save_folder, "latest.pkl"))
-        # torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "latest.pkl"))
+            labels = (labels > self.cfg["label_vague_threshold"]).type(torch.float32)
+            self.metric.update(labels, out_T)
+        miou_all, prec_all, recall_all, fmeasure_all = self.metric.get()
+
+        torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "latest.pkl"))
         if miou_all > self.best_miou:
             self.best_miou = miou_all
-            torch.save(self.net_heatmap.state_dict(), osp.join(self.args.save_folder, "best.pkl"))
-            # torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "best.pkl"))
+            torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "best.pkl"))
         if fmeasure_all > self.best_fmeasure:
             self.best_fmeasure = fmeasure_all
         if prec_all > self.best_prec:
             self.best_prec = prec_all
-        if recall_all < self.best_recall:
+        if recall_all > self.best_recall:
             self.best_recall = recall_all
 
         # print(miou, self.best_miou, fmeasure, self.best_fmeasure)
 
-        self.writer.add_scalar("Test/mIoU", miou, self.iter_num)
-        self.writer.add_scalar("Test/F1", fmeasure, self.iter_num)
+        self.writer.add_scalar("Test/mIoU", miou_all, self.iter_num)
+        self.writer.add_scalar("Test/F1", fmeasure_all, self.iter_num)
         self.writer.add_scalar("Best/mIoU", self.best_miou, self.iter_num)
         self.writer.add_scalar("Best/Fmeasure", self.best_fmeasure, self.iter_num)
 
@@ -345,20 +289,23 @@ class Trainer(object):
             base_log.format(self.args.dataset, miou_all, self.best_miou, prec_all, self.best_prec, recall_all, self.best_recall, fmeasure_all, self.best_fmeasure)
         )
 
-    def load_model(self, model_path1: str = "", model_path2: str = ""):
+    def load_model(self, model_path: str = "", model_path1: str = "", model_path2: str = ""):
+        if model_path != "":
+            model_path = osp.join(model_path, "best.pkl")
+            self.net.load_state_dict(torch.load(model_path))
         if model_path1 != "":
             model_path1 = osp.join(model_path1, "best.pkl")
-            self.net_heatmap.load_state_dict(torch.load(model_path1))
+            self.net.net_heatmap.load_state_dict(torch.load(model_path1))
         if model_path2 != "":
             model_path2 = osp.join(model_path2, "best.pkl")
-            self.net_localseg.load_state_dict(torch.load(model_path2))
+            self.net.net_localseg.load_state_dict(torch.load(model_path2))
 
 
 if __name__ == "__main__":
     args = parse_args()
 
     trainer = Trainer(args)
-    trainer.load_model(args.model_path1, args.model_path2)
+    trainer.load_model(args.model_path, args.model_path1, args.model_path2)
     trainer.training()
 
     # print('Best mIoU: %.5f, Best Fmeasure: %.5f\n\n' % (trainer.best_miou, trainer.best_fmeasure))

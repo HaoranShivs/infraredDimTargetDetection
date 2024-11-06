@@ -3,12 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class  SoftLoULoss(nn.Module):
+class SoftLoULoss(nn.Module):
     def __init__(self):
         super(SoftLoULoss, self).__init__()
 
     def forward(self, pred, target):
-        smooth = 1
+        smooth = 0.1
         intersection = pred * target
 
         intersection_sum = torch.sum(intersection, dim=(1,2,3))
@@ -39,31 +39,62 @@ class SoftIoUL1NromLoss(nn.Module):
         return loss
 
 
-def downsampleImg(img, cfg_dict):
-    downsampler = nn.MaxPool2d(2, 2)
-
-    downsampled_imgs = []
-    downsampled_img = img
-
-    for i in range(len(cfg_dict["multiscalefeature_outchannel"]), 0, -1):
-        downsampled_img = downsampler(downsampled_img)
-        if i <= 3:
-            downsampled_imgs.append(downsampled_img)
-    
-    return downsampled_imgs
-
-
 class Heatmap_SoftIoU(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg):
         super(Heatmap_SoftIoU, self).__init__()
         self.softIouLoss = SoftLoULoss()
+        self.cfg = cfg
 
-    def forward(self, pred, target):
-        loss1 = self.softIouLoss(pred[0], target[2])
-        loss2 = self.softIouLoss(pred[1], target[1])
-        loss3 = self.softIouLoss(pred[2], target[0])
+    def forward(self, preds, label):
+        labels = self.downsampleImg(label)
+        loss1 = self.softIouLoss(preds[0], labels[2])
+        loss2 = self.softIouLoss(preds[1], labels[1])
+        loss3 = self.softIouLoss(preds[2], labels[0])
         loss = (loss1 + loss2 + loss3) / 3 
         return loss
+    
+    def downsampleImg(self, img):
+        downsampler = nn.MaxPool2d(2, 2)
+
+        downsampled_imgs = []
+        downsampled_img = img
+
+        for i in range(len(self.cfg["multiscalefeature_outchannel"]), 0, -1):
+            downsampled_img = downsampler(downsampled_img)
+            if i <= 3:
+                downsampled_imgs.append(downsampled_img)
+        
+        return downsampled_imgs
+
+
+class Heatmap_MSE(nn.Module):
+    def __init__(self, cfg):
+        super(Heatmap_MSE, self).__init__()
+        self.mse_loss = nn.MSELoss()
+        self.cfg = cfg
+
+    def forward(self, preds, label):
+        # make the vague caused by augment transform clear
+        label = (label > self.cfg["label_vague_threshold"]).type(torch.float32)
+        labels = self.downsampleImg(label)
+        loss1 = self.mse_loss(preds[0], labels[2])
+        loss2 = self.mse_loss(preds[1], labels[1])
+        loss3 = self.mse_loss(preds[2], labels[0])
+        loss = (loss1 + loss2 + loss3) / 3 
+        return loss
+    
+    def downsampleImg(self, img):
+        downsampler = nn.AvgPool2d(2, 2)
+
+        downsampled_imgs = []
+        downsampled_img = img
+
+        for i in range(len(self.cfg["multiscalefeature_outchannel"]), 0, -1):
+            downsampled_img = downsampler(downsampled_img)
+            if i <= 3:
+                downsampled_imgs.append(downsampled_img)
+        
+        return downsampled_imgs
 
 
 class ImageRecoverLoss(nn.Module):

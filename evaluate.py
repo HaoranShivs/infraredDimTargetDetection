@@ -14,10 +14,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # from models import get_model
-# from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from dataprocess.croped_sirst import Crop_IRSTD1kDataset, Crop_NUDTDataset
+from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
 # from net.basenet import BaseNet1, BaseNet2, LargeBaseNet, LargeBaseNet2, BaseNet3, GaussNet, GaussNet3, GaussNet4, SigmoidNet
-from net.twotasknet import LocalSegment
+# from net.twotasknet import LocalSegment, TwoTaskNetWithLoss
+# from net.attentionnet import attenMultiplyUNet_withloss
+from net.basenet import BaseNet4, BaseNetWithLoss
 from utils.loss import SoftLoULoss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
@@ -33,7 +34,7 @@ def parse_args():
     parser = ArgumentParser(description='Evaluation of BaseNet')
 
     parser.add_argument('--gpu', type=str, default='0', help='GPU number')
-
+    parser.add_argument("--seed", type=int, default=1, help="seed")
     #
     # Dataset parameters
     #
@@ -46,11 +47,21 @@ def parse_args():
     #
     parser.add_argument('--model-path', type=str, default='result/20240620T10-46-34_basenet_16-32-48-64-128_nudt',
                         help='net name: fcn')
-
+    
     args = parser.parse_args()
+
+    # seed
+    if args.seed != 0:
+        set_seeds(args.seed)
 
     return args
 
+def set_seeds(seed):
+    np.random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 class Evaluate(object):
     def __init__(self, args):
@@ -61,30 +72,20 @@ class Evaluate(object):
         with open(cfg_path) as f:
             self.cfg = yaml.safe_load(f)
 
-        ## dataset
-        # if args.dataset == 'nudt':
-        #     valset = NUDTDataset(base_dir=r'W:/DataSets/ISTD/NUDT-SIRST', mode='test', base_size=args.base_size)
-        # # elif args.dataset == 'sirstaug':
-        # #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
-        # #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
-        # #     valset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
-        # #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
-        # elif args.dataset == 'irstd1k':
-        #     valset = IRSTD1kDataset(base_dir=r'W:/DataSets/ISTD/IRSTD-1k', mode='test', base_size=args.base_size) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
-        # else:
-        #     raise NotImplementedError
-        if args.dataset == "irstd1k":
-            valset = Crop_IRSTD1kDataset(
-                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size
-            )
-        elif args.dataset == "nudt":
-            valset = Crop_NUDTDataset(
-                base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="test", base_size=args.base_size
-            )
+        # dataset
+        if args.dataset == 'nudt':
+            valset = NUDTDataset(base_dir=r'W:/DataSets/ISTD/NUDT-SIRST', mode='test', base_size=args.base_size, cfg=self.cfg)
+        # elif args.dataset == 'sirstaug':
+        #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
+        #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
+        #     valset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
+        #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
+        elif args.dataset == 'irstd1k':
+            valset = IRSTD1kDataset(base_dir=r'W:/DataSets/ISTD/IRSTD-1k', mode='test', base_size=args.base_size, cfg=self.cfg) # base_dir=r'E:\ztf\datasets\IRSTD-1k'
         else:
             raise NotImplementedError
 
-        self.val_data_loader = Data.DataLoader(valset, batch_size=32, shuffle=True)
+        self.val_data_loader = Data.DataLoader(valset, batch_size=32, shuffle=False, drop_last=False)
 
         ## GPU
         if torch.cuda.is_available():
@@ -92,12 +93,15 @@ class Evaluate(object):
         self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
 
         ## model
-        self.net = LocalSegment(cfg=self.cfg)
+        net = BaseNet4(1, self.cfg)
+        loss_fn = SoftLoULoss()
+        self.net = BaseNetWithLoss(self.cfg, net, loss_fn)
 
         ## load_model
-        model_path = osp.join(args.model_path, 'best.pkl')
+        model_path = osp.join(args.model_path, 'latest.pkl')
         self.net.load_state_dict(torch.load(model_path))
         self.net = self.net.to(self.device)
+        self.net.eval()
 
         self.softiou = SoftLoULoss()
 
@@ -118,16 +122,23 @@ class Evaluate(object):
 
     def validation(self):
         self.metric.reset()
-        loss = torch.tensor([1,], dtype=torch.float32)
+        self.eval_my_PD_FA.reset()
+        loss = torch.tensor([0,], dtype=torch.float32)
+        consume_time = 0
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
-                y_hat = self.net(data.to(self.device))
+                # noise = torch.zeros((data.shape[0], 1, 32, 32), device=data.device)
+                start_time = time.time()
+                y_hat = self.net.net(data.to(self.device))
+                end_time = time.time()
+                consume_time += end_time - start_time
             # out_D, out_T = out_D.cpu(), out_T.cpu()
             out_T = y_hat.cpu()
+            # out_T = (out_T > 0.5).type(torch.float32)
 
-            labels = (labels > 0.5).type(torch.float32)
+            labels = (labels > self.cfg["label_vague_threshold"]).type(torch.float32)
             loss_softiou = self.softiou(out_T, labels)
-            if (loss_softiou < loss):
+            if (loss_softiou > loss):
                 self.best_ori_pict = data.cpu()
                 self.best_seg_pict = out_T
                 self.best_seg_label = labels
@@ -135,17 +146,14 @@ class Evaluate(object):
             # loss_mse = self.mse(out_D, data)
             # gamma = torch.Tensor([0.1]).to(self.device)
             # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
-
+    
             self.metric.update(labels, out_T)
-
+            for j in range(labels.shape[0]):
+                self.eval_my_PD_FA.update(out_T[j,0], labels[j,0])
 
         miou, prec, recall, fmeasure = self.metric.get()
-        if miou > self.best_miou:
-            self.best_miou = miou
-        if fmeasure > self.best_fmeasure:
-            self.best_fmeasure = fmeasure
-
-        print(miou, self.best_miou, fmeasure, self.best_fmeasure)
+        pd, fa = self.eval_my_PD_FA.get()
+        print(miou, fmeasure, pd, fa, consume_time)
 
     def visualize(self):
         oripict = (np.array(self.best_ori_pict) * 255).astype(np.uint8)

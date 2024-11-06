@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from net.utils import hide_channels, gaussian_kernel
 
@@ -93,7 +94,7 @@ class Conv2d_Bn_Relu(nn.Module):
         padding: int = 0,
     ):
         super(Conv2d_Bn_Relu, self).__init__()
-        self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride, padding)
+        self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride, padding, bias=False)
         self.bn = nn.BatchNorm2d(out_channel)
         self.relu = nn.ReLU()
 
@@ -113,8 +114,8 @@ class ResBlock(nn.Module):
         stride: int = 1,
     ):
         super(ResBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size, stride, 1)
-        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, stride, 1)
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size, stride, 1, bias=False)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size, stride, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channel)
         self.bn2 = nn.BatchNorm2d(out_channel)
         self.relu = nn.ReLU()
@@ -328,6 +329,55 @@ class UpScaler(nn.Module):
         return res
 
 
+class UpScaler_cat(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size=3):
+        super(UpScaler_cat, self).__init__()
+        self.conv1 = nn.Sequential(Conv2d_Bn_Relu(out_channel+in_channel, out_channel+in_channel, 1),
+                                   Conv2d_Bn_Relu(out_channel+in_channel, out_channel+in_channel, 1))
+        self.conv2 = ResBlock(out_channel+in_channel, out_channel)
+        self.conv_residual = Conv2d_Bn_Relu(out_channel+in_channel, out_channel+in_channel, 1)
+
+    def forward(self, f_deep, f_shallow=None):
+        f_deep = F.interpolate(f_deep, scale_factor=2, mode='nearest')
+        f = torch.concatenate((f_deep, f_shallow), dim=1)
+        f = f + self.conv1(f)
+        f = self.conv2(f)
+        return f
+
+
+class UpScaler_compare(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size=3):
+        super(UpScaler_compare, self).__init__()
+        self.conv1 = ResBlock(in_channel, out_channel)
+        self.conv2 = ResBlock(out_channel, out_channel)
+
+    def forward(self, f_deep, f_shallow=None):
+        # upscale and decrease channel
+        f_deep = F.interpolate(f_deep, scale_factor=2, mode='nearest')
+        f_deep = self.conv1(f_deep)
+        f_diff = F.sigmoid(torch.sum((f_deep - f_shallow).pow(2), dim=1)) * 2 - 1
+        f_diff = f_diff.unsqueeze(1)
+        f = f_shallow * f_diff + f_deep * (1 - f_diff)
+        f = self.conv2(f)
+        return f
+
+
+class UpScaler_compare2(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size=3):
+        super(UpScaler_compare2, self).__init__()
+        self.conv1 = ResBlock(in_channel, out_channel)
+        self.conv2 = ResBlock(out_channel, out_channel)
+
+    def forward(self, f_deep, f_shallow=None):
+        # upscale and decrease channel
+        f_deep = F.interpolate(f_deep, scale_factor=2, mode='nearest')
+        f_deep = self.conv1(f_deep)
+        f_diff = F.sigmoid((f_deep - f_shallow).pow(2)) * 2 - 1
+        f = f_shallow * f_diff + f_deep * (1 - f_diff)
+        f = self.conv2(f)
+        return f
+
+
 class MultiScaleFeatureNet(nn.Module):
     def __init__(self, in_channel, out_channel_list, atten_choice=0, cfg=None, downsampler=None):
         super(MultiScaleFeatureNet, self).__init__()
@@ -393,11 +443,9 @@ class FusionNet_plus(nn.Module):
         return mixf
 
 
-"""
 class FusionNet_cat(nn.Module):
     def __init__(self, in_channel_list=None, out_channel=256):
         super(FusionNet_cat, self).__init__()
-        # sum(in_channel_list[-1:]), sum(in_channel_list[-1:])
         self.cf1 = DeepFeatureExtractor(sum(in_channel_list[:1]), sum(in_channel_list[:1]), 3, 1)
         self.cf2 = DeepFeatureExtractor(sum(in_channel_list[:2]), sum(in_channel_list[:2]), 3, 1)
         self.cf3 = DeepFeatureExtractor(sum(in_channel_list[:3]), sum(in_channel_list[:3]), 3, 1)
@@ -417,7 +465,6 @@ class FusionNet_cat(nn.Module):
         fusion_feature = self.transform(f4)
 
         return fusion_feature
-"""
 
 
 class FusionNet_upscale(nn.Module):
@@ -447,13 +494,12 @@ class FusionNet_upscale(nn.Module):
 class DetectNet1(nn.Module):
     def __init__(self, in_channel, out_channel):
         super(DetectNet1, self).__init__()
-        self.conv = nn.Conv2d(in_channel, out_channel, 1, 1)
-
-        self.sigmoid = nn.Sigmoid()
+        self.conv1 = Conv2d_Bn_Relu(in_channel, in_channel, 1, 1)
+        self.conv2 = nn.Conv2d(in_channel, out_channel, 1, 1)
 
     def forward(self, feature):
-        result = self.conv(feature)
-        result = self.sigmoid(result)
+        f = self.conv1(feature)
+        result = F.sigmoid(self.conv2(f))
         return result
 
 
@@ -554,6 +600,142 @@ class BaseNet3(nn.Module):
         # target = self.detect(xf1, img)
         target = self.detect(xf1)
         return target
+
+
+class BaseNet4(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(BaseNet4, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        self.resconv = ShallowFeatureExtractor(in_channel, cfg["resconv_outchannel"])    # 256
+
+        self.ds1 = nn.Sequential(ResBlock(cfg["resconv_outchannel"], 32, 3, 1),
+                                 ShallowFeatureExtractor(32, 32, 3, 1, Conv2d_Bn_Relu(32, 32, 3, 2, 1)))    # 128
+        self.ds2 = nn.Sequential(ResBlock(32, 64, 3, 1), 
+                                 ShallowFeatureExtractor(64,   64, 3, 1, Conv2d_Bn_Relu(64, 64, 3, 2, 1)))    # 64
+        downsampler = nn.MaxPool2d(3, 2, 1)
+        self.ds3 = nn.Sequential(ResBlock(64, 128, 3, 1), 
+                                 ShallowFeatureExtractor(128, 128, 3, 1, downsampler))    # 32
+        self.ds4 = nn.Sequential(ResBlock(128, 256, 3, 1), 
+                                 ShallowFeatureExtractor(256, 256, 3, 1, downsampler)) # 16
+        # self.ds5 = nn.Sequential(ResBlock(256, 512, 3, 1), 
+        #                          ShallowFeatureExtractor(512, 512, 3, 1, downsampler)) # 8
+        # self.ds6 = nn.Sequential(ResBlock(512, 1024, 3, 1), 
+        #                          ShallowFeatureExtractor(1024, 1024, 3, 1, downsampler)) # 4
+        # self.ds7 = nn.Sequential(ResBlock(256, 256, 3, 1), 
+        #                          ShallowFeatureExtractor(256, 256, 3, 1, downsampler)) # 2
+        
+        # self.us7 = UpScaler_cat(256, 256)   # 4
+        # self.us6 = UpScaler_cat(1024, 512)   # 8
+        # self.us5 = UpScaler_cat(512, 256)   # 16
+        self.us4 = UpScaler_compare(256, 128)   # 32
+        self.us3 = UpScaler_compare(128, 64)    # 64
+        self.us2 = UpScaler_compare(64, 32)     # 128
+        self.us1 = UpScaler_compare(32, cfg["resconv_outchannel"])  # 256
+
+        self.detect = DetectNet1(cfg["resconv_outchannel"], 1)
+
+    def forward(self, img):
+        f_256 = self.resconv(img)
+        f_128 = self.ds1(f_256)
+        f_64 = self.ds2(f_128)
+        f_32 = self.ds3(f_64)
+        f_16 = self.ds4(f_32)
+        # f_8 = self.ds5(f_16)
+        # f_4 = self.ds6(f_8)
+        # f_2 = self.ds7(f_4)
+
+        # seg_4 = self.us7(f_2, f_4)
+        # seg_8 = self.us6(f_4, f_8)
+        # seg_16 = self.us5(seg_8, f_16)
+        seg_32 = self.us4(f_16, f_32)
+        seg_64 = self.us3(seg_32, f_64)
+        seg_128 = self.us2(seg_64, f_128)
+        seg_256 = self.us1(seg_128, f_256)
+        # seg_256 = F.interpolate(seg_128, scale_factor=2, mode='bilinear')
+
+        res = self.detect(seg_256)
+        return res
+
+
+class interact(nn.Module):
+    def __init__(self, dist):
+        super(interact, self).__init__()
+        self.dist = dist
+
+    def forward(self, feature):
+        avg_pooled_feature = F.interpolate(F.avg_pool2d(feature, 3, 2, 1), scale_factor=2, mode='nearest')
+        top_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=self.dist*2, dims=-2)).pow(2), dim=1, keepdim=True)
+        top_right_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=[self.dist*2, -self.dist*2], dims=[-2, -1])).pow(2), dim=1, keepdim=True)
+        top_left_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=[self.dist*2, self.dist*2], dims=[-2, -1])).pow(2), dim=1, keepdim=True)
+        bot_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=-self.dist*2, dims=-2)).pow(2), dim=1, keepdim=True)
+        bot_right_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=[-self.dist*2, -self.dist*2], dims=[-2, -1])).pow(2), dim=1, keepdim=True)
+        bot_left_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=[-self.dist*2, self.dist*2], dims=[-2, -1])).pow(2), dim=1, keepdim=True)
+        right_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=-self.dist*2, dims=-1)).pow(2), dim=1, keepdim=True)
+        left_f = torch.sum((feature - torch.roll(avg_pooled_feature, shifts=self.dist*2, dims=-1)).pow(2), dim=1, keepdim=True)
+        diff = torch.concatenate((top_left_f, top_f, top_right_f, left_f, right_f, bot_left_f, bot_f, bot_right_f), dim=1)
+        diff = torch.max(diff, dim=1, keepdim=True).values
+        return diff
+        
+
+class BaseNet5(nn.Module):
+    def __init__(self, in_channel: int = 1, cfg=None):
+        super(BaseNet5, self).__init__()
+        if cfg is None:
+            raise ValueError("parameter 'cfg' is not given")
+
+        self.resconv = ShallowFeatureExtractor(in_channel, cfg["resconv_outchannel"])    # 256
+
+        self.ds1 = nn.Sequential(ResBlock(cfg["resconv_outchannel"], 32, 3, 1),
+                                 ShallowFeatureExtractor(32, 32, 3, 1, Conv2d_Bn_Relu(32, 32, 3, 2, 1)))    # 128
+        self.ds2 = nn.Sequential(ResBlock(32, 64, 3, 1), 
+                                 ShallowFeatureExtractor(64,   64, 3, 1, Conv2d_Bn_Relu(64, 64, 3, 2, 1)))    # 64
+        self.ds3 = nn.Sequential(ResBlock(64, 128, 3, 1), 
+                                 ShallowFeatureExtractor(128, 128, 3, 1, Conv2d_Bn_Relu(128, 128, 3, 2, 1)))    # 32
+
+        self.contrast_1 = interact(1)   #(B, 1, 32, 32)
+        self.contrast_3 = interact(3)
+        self.contrast_5 = interact(5)
+        
+        self.us3 = UpScaler_compare(128, 64)    # 64
+        self.us2 = UpScaler_compare(64, 32)     # 128
+        self.us1 = UpScaler_compare(32, cfg["resconv_outchannel"])  # 256
+
+        self.detect = DetectNet1(cfg["resconv_outchannel"], 1)
+
+    def forward(self, img):
+        f_256 = self.resconv(img)
+        f_128 = self.ds1(f_256)
+        f_64 = self.ds2(f_128)
+        f_32 = self.ds3(f_64)
+
+        contrast1 = self.contrast_1(f_32)
+        contrast2 = self.contrast_3(f_32)
+        contrast3 = self.contrast_5(f_32)
+
+        f_32 = f_32 * (contrast1 + contrast2 + contrast3)
+        
+        seg_64 = self.us3(f_32, f_64)
+        seg_128 = self.us2(seg_64, f_128)
+        seg_256 = self.us1(seg_128, f_256)
+        # seg_256 = F.interpolate(seg_128, scale_factor=2, mode='bilinear')
+
+        res = self.detect(seg_256)
+        return res
+
+
+class BaseNetWithLoss(nn.Module):
+    def __init__(self, cfg, net, loss_fn):
+        super(BaseNetWithLoss, self).__init__()
+        self.net = net
+        self.loss_fn = loss_fn
+        self.cfg = cfg
+
+    def forward(self, img, label, current_loss=1.0):
+        res = self.net(img)
+        loss = self.loss_fn(res, label)
+        return res, loss
 
 
 class LargeBaseNet(nn.Module):

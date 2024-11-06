@@ -7,11 +7,13 @@ import torchvision.transforms as transforms
 import cv2
 import os
 import os.path as osp
+import matplotlib.pyplot as plt
 
 # import sys
 import random
 # import scipy.io as scio
 from scipy.signal import convolve2d
+import scipy.ndimage
 import numpy as np
 
 __all__ = ["SirstAugDataset", "IRSTD1kDataset", "NUDTDataset"]
@@ -40,7 +42,18 @@ class Rotate_4D_Transform:
             img = torch.flip(img, dims=(-2,))
         return img
         
-
+class augumentation(object):
+    def __call__(self, input, target):
+        if random.random()<0.5:
+            input = input[::-1, :]
+            target = target[::-1, :]
+        if random.random()<0.5:
+            input = input[:, ::-1]
+            target = target[:, ::-1]
+        if random.random()<0.5:
+            input = input.transpose(1, 0)
+            target = target.transpose(1, 0)
+        return input.copy(), target.copy()
 # class SirstAugDataset(Data.Dataset):
 #     '''
 #     Return: Single channel
@@ -105,6 +118,7 @@ class IRSTD1kDataset(Data.Dataset):
         base_dir=r"W:/DataSets/Infraid_datasets/IRSTD-1k",
         mode="train",
         base_size=256,
+        pt_label=False,
         cfg=None
     ):
         assert mode in ["train", "test"]
@@ -115,31 +129,28 @@ class IRSTD1kDataset(Data.Dataset):
             self.data_dir = osp.join(base_dir, "test")
         else:
             raise NotImplementedError
+        
+        self.mode = mode
         self.cfg = cfg
         self.base_size = base_size
+        self.pt_label = pt_label
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
                 self.names.append(filename)
 
-        if mode == "test":
-            self.augment = transforms.Compose([
-                    transforms.RandomResizedCrop(
-                    base_size,
-                    scale=(0.8, 1.0)),
-                    transforms.RandomAffine(degrees=0, translate=(0.3, 0.3)),
-                    transforms.RandomHorizontalFlip(),  # 随机水平翻转
-                    Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
-                ])
-        else:
-            self.augment = transforms.Compose([
-                transforms.RandomResizedCrop(
-                    base_size,
-                    scale=(0.8, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
-                transforms.RandomAffine(degrees=0, translate=(0.5, 0.5), shear=0),
-                transforms.RandomHorizontalFlip(),  # 随机水平翻转
-                Rotate_4D_Transform(),
-            ])
+        self.augment_test = transforms.Compose([
+            transforms.Resize((256, 256))
+        ])
+
+        self.augment_train = transforms.Compose([
+            transforms.RandomResizedCrop(
+                base_size,
+                scale=(0.5, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
+            transforms.RandomAffine(degrees=180, translate=(0.3, 0.3)),
+            transforms.RandomHorizontalFlip(),  # 随机水平翻转
+            # Rotate_4D_Transform(),
+        ])
 
     def __getitem__(self, i):
         name = self.names[i]
@@ -148,20 +159,57 @@ class IRSTD1kDataset(Data.Dataset):
 
         img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
 
-        img = torch.from_numpy(img).type(torch.FloatTensor)
-        mask = torch.from_numpy(mask).type(torch.FloatTensor)
+        img = torch.from_numpy(img).type(torch.float32)
+        mask = torch.from_numpy(mask).type(torch.float32)
         data = torch.cat((img.unsqueeze(0), mask.unsqueeze(0)), dim=0)
 
-        data_aug = self.augment(data)
+        data_aug = self.augment_train(data) if self.mode == "train" else self.augment_test(data)
 
         data_aug = data_aug / 255.0
 
         data_aug = data_aug.unsqueeze(1)
 
+        if self.pt_label:
+            pt_label = self.__mask2point(data_aug[1])
+            data_aug[1] = pt_label
+
         return data_aug[0], data_aug[1]
 
     def __len__(self):
         return len(self.names)
+    
+    def __mask2point(self, mask):
+        # 将mask转换为numpy数组以便处理
+        mask_array = np.array(mask[0])
+        # 使用连通组件分析找到所有独立的目标区域
+        labels, num_features = scipy.ndimage.label(mask_array > self.cfg["label_vague_threshold"])
+
+        pts_label = torch.zeros_like(mask, dtype=torch.float32)
+
+        for label_id in range(1, num_features + 1):
+            # 获取当前连通组件的位置
+            pos = np.where(labels == label_id)
+            
+            if len(pos[0]) == 0:
+                continue 
+
+            # 计算目标区域的边界框
+            top_left_x = min(pos[1])
+            top_left_y = min(pos[0])
+            bottom_right_x = max(pos[1])
+            bottom_right_y = max(pos[0])
+
+            # 计算正方形的中心点, 并加随机数，产生手工标注的误差效果
+            center_x = (top_left_x + bottom_right_x) // 2
+            center_y = (top_left_y + bottom_right_y) // 2
+            # center_x = (top_left_x + bottom_right_x) // 2 + torch.randint(-2, 3, (1,))
+            # center_y = (top_left_y + bottom_right_y) // 2 + torch.randint(-2, 3, (1,))
+
+            # center_x = np.clip(center_x, 0, 255)
+            # center_y = np.clip(center_y, 0, 255)
+            pts_label[0, center_y, center_x] = 1.0
+
+        return pts_label
 
 
 class NUDTDataset(Data.Dataset):
@@ -173,8 +221,9 @@ class NUDTDataset(Data.Dataset):
         self,
         base_dir=r"W:/DataSets/Infraid_datasets/NUDT-SIRST",
         mode="train",
-        mask_blurred=False,
         base_size=256,
+        noise=False,
+        cfg=None
     ):
         assert mode in ["train", "test"]
 
@@ -184,30 +233,19 @@ class NUDTDataset(Data.Dataset):
             self.data_dir = osp.join(base_dir, "test")
         else:
             raise NotImplementedError
+        self.mode = mode 
         self.base_size = base_size
-        self.mask_blurred = mask_blurred
+        self.cfg = cfg
+        self.noise = noise
 
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
                 self.names.append(filename)
 
-        if mode == "test":
-            self.augment = transforms.Compose([
-                    transforms.RandomResizedCrop(
-                    base_size,
-                    scale=(0.8, 1.0)),
-                    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-                    transforms.RandomHorizontalFlip(),  # 随机水平翻转
-                    Rotate_4D_Transform(),  # randomly rotate in angles: 0, 90, 180, 270
-                ])
-        else:
-            self.augment = transforms.Compose([
-                transforms.RandomResizedCrop(
-                    base_size,
-                    scale=(0.8, 1.0)
-                ),  # 在给定的scale范围内随机缩放并裁剪
-                transforms.RandomAffine(degrees=180, translate=(0.1, 0.1), shear=0),
+        self.augment = transforms.Compose([
+                # transforms.RandomResizedCrop(base_size, scale=(0.8, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
+                transforms.RandomAffine(degrees=30, translate=(0.3, 0.3), shear=0),
                 transforms.RandomHorizontalFlip(),  # 随机水平翻转
             ])
 
@@ -215,22 +253,23 @@ class NUDTDataset(Data.Dataset):
         name = self.names[i]
         img_path = osp.join(self.data_dir, "images", name)
         label_path = osp.join(self.data_dir, "masks", name)
-
         img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
-        # img = cv2.resize(img, [self.base_size, self.base_size], interpolation=cv2.INTER_LINEAR)
-        # mask = cv2.resize(mask, [self.base_size, self.base_size], interpolation=cv2.INTER_NEAREST)
         img = torch.from_numpy(img).type(torch.FloatTensor)
         mask = torch.from_numpy(mask).type(torch.FloatTensor)
         data = torch.cat((img.unsqueeze(0), mask.unsqueeze(0)), dim=0)
 
-        data_aug = self.augment(data)
+        data_aug = self.augment(data) if self.mode == "train" else data 
 
         data_aug = data_aug / 255.0
-
-        if self.mask_blurred:
-            mask = gaussian_filter(np.array(data_aug[1]), sigma=1, kernel_size=5)
-            data_aug[1] = torch.from_numpy(mask)
         data_aug = data_aug.unsqueeze(1)
+
+        if self.noise:
+            noise_path = osp.join(self.data_dir, "noise32", name)
+            noise = cv2.imread(noise_path, 0)
+            noise = torch.from_numpy(noise).type(torch.float32) / 255.0
+            noise = noise.unsqueeze(0)
+            return data_aug[0], data_aug[1], noise
+
         return data_aug[0], data_aug[1]
 
     def __len__(self):

@@ -29,3 +29,4 @@ def gaussian_kernel(channel, kernel_size, sigma):
     for i in range(channel):
         params[i, i] = kernel_2d
     return params
+
