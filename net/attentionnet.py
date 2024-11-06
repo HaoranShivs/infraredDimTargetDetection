@@ -22,14 +22,13 @@ torch.set_printoptions(
 class AttentionFromdeeper(nn.Module): 
     def __init__(self, in_channel):
         super(AttentionFromdeeper, self).__init__()
-        self.conv1 = nn.Conv2d(in_channel, in_channel, 3, 1, 1)
-        self.bn = nn.BatchNorm2d(in_channel)
+        self.conv1 = DeepFeatureExtractor(in_channel, in_channel, 3, 1)
         self.conv2 = nn.Conv2d(in_channel, 1, 3, 1, 1)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, inputs):
         B, _, S, _ = inputs.shape
-        x = F.sigmoid(self.bn(self.conv1(inputs))) * 2 - 1
+        x = self.conv1(inputs)
         x = self.conv2(x)
         res = self.normalize_tensor(self.softmax(x.view(B, 1, S * S))).view(B, 1, S, S)
         return res
@@ -241,20 +240,20 @@ class attenMultiplyUNet_withloss(nn.Module):
     def forward(self, img, label):
         res, _feature_map, atten_maps = self.net(img)
         loss = self.loss_fn(res, label)
-        # # 显示图片
-        # row_num = 4
-        # fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
-        # for i in range(row_num):
-        #     axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray')
-        # plt.tight_layout()
-        # plt.show()
-        # a = input()
+        # 显示图片
+        row_num = 4
+        fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
+        for i in range(row_num):
+            axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray')
+        plt.tight_layout()
+        plt.show()
+        a = input()
         if self.feature_map:
             return res, loss, _feature_map
         return res, loss
