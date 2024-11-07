@@ -128,7 +128,7 @@ class Trainer(object):
         #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
         elif args.dataset == "irstd1k":
             trainset = IRSTD1kDataset(
-                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size, cfg=self.cfg
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size, cfg=self.cfg,
             )
             valset = IRSTD1kDataset(
                 base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size, cfg=self.cfg
@@ -136,8 +136,8 @@ class Trainer(object):
         else:
             raise NotImplementedError
 
-        self.train_data_loader = Data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
-        self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size, shuffle=False, drop_last=False)
+        self.train_data_loader = Data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=2)
+        self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=2)
         self.iter_per_epoch = len(self.train_data_loader)
         self.max_iter = args.epochs * self.iter_per_epoch
 

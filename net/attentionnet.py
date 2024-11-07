@@ -79,12 +79,12 @@ class ConvUpSample(nn.Module):
         self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
         self.conv = ShallowFeatureExtractor(out_channel, out_channel, 3, 1)
  
-    def forward(self, x_deep, x_shallow=None):
+    def forward(self, x_deep, x_shallow=None, ratio=0.1):
         # x = self.conv_upsampler(x_deep)
         x_shallow = self.shallow_proj(x_shallow)
         atten = F.interpolate(self.atten_proj(x_deep), scale_factor=2, mode='bilinear')
         # x = torch.where(atten > 0.5, x_shallow, x)
-        x = (atten+ 1) * x_shallow / 2
+        x = (atten*(1-ratio) + ratio) * x_shallow
         x = self.conv(x)
         return x, atten
 
@@ -205,10 +205,10 @@ class attenMultiplyUNet2(nn.Module):
         self.ds3 = nn.Sequential(ConvDownSample(64, 128), ResBlock(128,128))    # 32
         self.ds4 = nn.Sequential(ConvDownSample(128, 256), ResBlock(256,256))   # 16
 
-        self.us4 = ConvUpSample(256, 128)
-        self.us3 = ConvUpSample(128, 64)
-        self.us2 = ConvUpSample(64, 32)
-        self.us1 = ConvUpSample(32, cfg["learning_conv_outchannel"])
+        self.us4 = ConvUpSample(256, 128, 0.5)
+        self.us3 = ConvUpSample(128, 64, 0.4)
+        self.us2 = ConvUpSample(64, 32, 0.3)
+        self.us1 = ConvUpSample(32, cfg["learning_conv_outchannel"], 0.2)
 
         self.linear = DetectNet1(cfg["learning_conv_outchannel"], 1)
 
