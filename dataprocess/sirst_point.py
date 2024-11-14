@@ -16,6 +16,9 @@ from scipy.signal import convolve2d
 import scipy.ndimage
 import numpy as np
 
+from dataprocess.sirst import Rotate_4D_Transform
+
+
 # class SirstAugDataset(Data.Dataset):
 #     '''
 #     Return: Single channel
@@ -80,7 +83,6 @@ class IRSTD1kDataset(Data.Dataset):
         base_dir=r"W:/DataSets/Infraid_datasets/IRSTD-1k",
         mode="train",
         base_size=256,
-        pt_label=False,
         cfg=None
     ):
         assert mode in ["train", "test"]
@@ -95,7 +97,6 @@ class IRSTD1kDataset(Data.Dataset):
         self.mode = mode
         self.cfg = cfg
         self.base_size = base_size
-        self.pt_label = pt_label
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
@@ -106,9 +107,9 @@ class IRSTD1kDataset(Data.Dataset):
         ])
 
         self.augment_train = transforms.Compose([
-            transforms.RandomResizedCrop(
-                base_size,
-                scale=(0.5, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
+            # transforms.RandomResizedCrop(
+            #     base_size,
+            #     scale=(0.5, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
             # Rotate_4D_Transform(),
         ])
 
@@ -129,9 +130,8 @@ class IRSTD1kDataset(Data.Dataset):
 
         data_aug = data_aug.unsqueeze(1)
 
-        if self.pt_label:
-            pt_label = self.__mask2point(data_aug[1])
-            data_aug[1] = pt_label
+        pt_label = self.__mask2point(data_aug[1])
+        data_aug[1] = pt_label
 
         return data_aug[0], data_aug[1]
 
@@ -142,7 +142,7 @@ class IRSTD1kDataset(Data.Dataset):
         # 将mask转换为numpy数组以便处理
         mask_array = np.array(mask[0])
         # 使用连通组件分析找到所有独立的目标区域
-        labels, num_features = scipy.ndimage.label(mask_array > self.cfg["label_vague_threshold"])
+        labels, num_features = scipy.ndimage.label(mask_array > 0.99)
 
         pts_label = torch.zeros_like(mask, dtype=torch.float32)
 

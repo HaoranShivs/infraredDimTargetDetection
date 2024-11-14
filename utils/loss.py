@@ -115,3 +115,57 @@ class ImageRecoverLoss(nn.Module):
             loss += loss_ * i
         
         return loss
+    
+
+class Detail_loss(nn.Module):
+    def __init__(self, dilation_kernel_size=3):
+        super(Detail_loss, self).__init__()
+        self.dilation_kernel_size = dilation_kernel_size
+
+    def forward(self, preds, labels, images):
+        # 对标签进行膨胀
+        dilated_labels = self.dilate_labels(labels, self.dilation_kernel_size) if self.dilation_kernel_size > 0 else labels
+        # 将膨胀后的标签与原图相乘，得到抠图
+        cropped_images = self.min_max_normalize(images * dilated_labels)
+        cropped_images = (cropped_images * 0.7 + 0.3) * dilated_labels
+        cropped_preds = preds * dilated_labels
+        # 计算损失
+        loss = self.compute_weighted_mse(cropped_images, cropped_preds, dilated_labels)
+        
+        return loss
+    
+    def dilate_labels(self, labels, dilation_kernel_size=5):
+        # 创建一个膨胀内核
+        kernel = torch.ones(1, 1, dilation_kernel_size, dilation_kernel_size, device=labels.device, requires_grad=False)
+        # 应用膨胀操作
+        dilated_labels = F.conv2d(labels, kernel, padding=dilation_kernel_size//2)
+        dilated_labels = (dilated_labels > 0).float()  # 转换为二值标签
+        return dilated_labels
+    
+    def compute_weighted_mse(self, cropped_images, cropped_preds, dilated_labels):
+        # 计算平方差
+        squared_diff = (cropped_images - cropped_preds).pow(2)
+        # 按高度和宽度求和
+        sum_squared_diff = torch.sum(squared_diff, dim=(2, 3))
+        # 计算膨胀标签的总和
+        sum_dilated_labels = torch.sum(dilated_labels, dim=(2, 3)) + 1e-8
+        # 检查哪些样本有目标物
+        valid_samples = sum_dilated_labels > 1e-8
+        # 只对有目标物的样本计算损失
+        if valid_samples.any():
+            normalized_loss = sum_squared_diff[valid_samples] / sum_dilated_labels[valid_samples]
+            mean_loss = torch.mean(normalized_loss)
+        else:
+            # 如果没有有效样本，返回0损失
+            mean_loss = torch.tensor(0.0, device=cropped_images.device)
+        return mean_loss
+    
+    def min_max_normalize(self, images):
+        # 计算每张图像的最小值和最大值
+        min_vals = images.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        max_vals = images.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+        # 避免除以零的情况
+        range_vals = max_vals - min_vals + 1e-8
+        # 归一化
+        normalized_images = (images - min_vals) / range_vals
+        return normalized_images

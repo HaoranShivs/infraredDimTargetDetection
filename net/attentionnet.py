@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 from net.basenet import Resconv, ShallowFeatureExtractor, DeepFeatureExtractor, UpScaler, Conv2d_Bn_Relu, DetectNet1, BaseNet3, ResBlock
 from net.twotasknet import ConvT2d_Bn_Relu
-from utils.loss import SoftLoULoss
+from utils.loss import SoftLoULoss, Detail_loss
 
 # 设置pytorch打印选项
 torch.set_printoptions(
@@ -24,13 +24,14 @@ class AttentionFromdeeper(nn.Module):
         super(AttentionFromdeeper, self).__init__()
         self.conv1 = DeepFeatureExtractor(in_channel, in_channel, 3, 1)
         self.conv2 = nn.Conv2d(in_channel, 1, 3, 1, 1)
-        self.softmax = nn.Softmax(dim=-1)
+        # self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, inputs):
         B, _, S, _ = inputs.shape
         x = self.conv1(inputs)
         x = self.conv2(x)
-        res = self.normalize_tensor(self.softmax(x.view(B, 1, S * S))).view(B, 1, S, S)
+        # res = self.normalize_tensor(self.softmax(x.view(B, 1, S * S))).view(B, 1, S, S)
+        res = F.sigmoid(x)
         return res
     
     def normalize_tensor(self, tensor):
@@ -71,23 +72,92 @@ class ConvDownSample(nn.Module):
         return x
 
 
-class ConvUpSample(nn.Module):
+class ConvDownSample2(nn.Module):
     def __init__(self, in_channel, out_channel):
+        super(ConvDownSample2, self).__init__()
+        # downsample
+        self.conv_ds = Conv2d_Bn_Relu(in_channel, out_channel, 3, 2, 1)
+        # process
+        self.conv1 = nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channel)
+        # res_link
+        self.conv_res = nn.Conv2d(in_channel, out_channel, 1, 2, 0, bias=False)
+        self.bn_res = nn.BatchNorm2d(out_channel)
+
+        self.relu = nn.ReLU()
+
+    def forward(self, feature):
+        x = self.conv_ds(feature)
+        x = self.bn1(self.conv1(x))
+        x = x + self.bn_res(self.conv_res(feature))
+        return self.relu(x)
+
+
+class ConvUpSample(nn.Module):
+    def __init__(self, in_channel, out_channel, ratio=0.1):
         super(ConvUpSample, self).__init__()
-        # self.conv_upsampler = ConvT2d_Bn_Relu(in_channel, out_channel, 3)
         self.atten_proj = AttentionFromdeeper(in_channel)
         self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
         self.conv = ShallowFeatureExtractor(out_channel, out_channel, 3, 1)
+        self.ratio = ratio
  
-    def forward(self, x_deep, x_shallow=None, ratio=0.1):
-        # x = self.conv_upsampler(x_deep)
+    def forward(self, x_deep, x_shallow=None):
         x_shallow = self.shallow_proj(x_shallow)
         atten = F.interpolate(self.atten_proj(x_deep), scale_factor=2, mode='bilinear')
         # x = torch.where(atten > 0.5, x_shallow, x)
-        x = (atten*(1-ratio) + ratio) * x_shallow
+        x = (atten*(1-self.ratio) + self.ratio) * x_shallow
         x = self.conv(x)
         return x, atten
+    
 
+class ConvUpSample_plus(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(ConvUpSample_plus, self).__init__()
+        self.atten_proj = AttentionFromdeeper(in_channel)
+        self.deep_proj = DeepFeatureExtractor(in_channel, out_channel, 3, 1)
+        self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
+        self.conv = ShallowFeatureExtractor(out_channel, out_channel, 3, 1)
+ 
+    def forward(self, x_deep, x_shallow=None):
+        x = F.interpolate(self.deep_proj(x_deep), scale_factor=2, mode='bilinear')
+        atten = F.interpolate(self.atten_proj(x_deep), scale_factor=2, mode='bilinear')
+        x = atten * self.shallow_proj(x_shallow) + (1-atten) * x
+        x = self.conv(x) 
+        return x, atten
+
+
+class Binaryhead_withLoss(nn.Module):
+    def __init__(self):
+        super(Binaryhead_withLoss, self).__init__()
+        downsmapler = nn.MaxPool2d(2,2)
+        self.conv = nn.Sequential(DeepFeatureExtractor(256, 512, 3, 1), 
+                                  downsmapler,                        # 4
+                                  DeepFeatureExtractor(512, 1024, 3, 1), 
+                                  downsmapler,                          # 2
+                                  nn.Conv2d(1024, 1, 2, 1, 0),
+                                  nn.Sigmoid())    # 1
+        
+        self.loss_fn = nn.BCELoss()
+        
+ 
+    def forward(self, deepf, label):
+        deepf = self.devide(deepf)
+        label = self.devide(label)
+        label = torch.max(label.view(label.shape[0], 1, -1), dim=-1).values
+
+        res = self.conv(deepf).view(deepf.shape[0], 1)  #(4B, 1, 1, 1)
+
+        loss = self.loss_fn(res, label)
+        return loss
+    
+    def devide(self, tensor):
+        B, C, S, _ = tensor.shape
+        tensor_split = tensor.view(B, C, S // 2, 2, S // 2, 2)
+        # 重新排列张量
+        tensor_split = tensor_split.permute(0, 3, 5, 1, 2, 4).contiguous()
+        # 合并 Batch 维度
+        new_tensor = tensor_split.view(4 * B, C, S // 2, S // 2)
+        return new_tensor
 
 class interact(nn.Module):
     def __init__(self, dist):
@@ -205,10 +275,15 @@ class attenMultiplyUNet2(nn.Module):
         self.ds3 = nn.Sequential(ConvDownSample(64, 128), ResBlock(128,128))    # 32
         self.ds4 = nn.Sequential(ConvDownSample(128, 256), ResBlock(256,256))   # 16
 
-        self.us4 = ConvUpSample(256, 128, 0.5)
-        self.us3 = ConvUpSample(128, 64, 0.4)
-        self.us2 = ConvUpSample(64, 32, 0.3)
-        self.us1 = ConvUpSample(32, cfg["learning_conv_outchannel"], 0.2)
+        self.us4 = ConvUpSample_plus(256, 128)
+        self.us3 = ConvUpSample_plus(128, 64)
+        self.us2 = ConvUpSample_plus(64, 32)
+        self.us1 = ConvUpSample_plus(32, cfg["learning_conv_outchannel"])
+
+        # self.us4 = ConvUpSample(256, 128, 0.1)
+        # self.us3 = ConvUpSample(128, 64, 0.1)
+        # self.us2 = ConvUpSample(64, 32, 0.1)
+        # self.us1 = ConvUpSample(32, cfg["learning_conv_outchannel"], 0.1)
 
         self.linear = DetectNet1(cfg["learning_conv_outchannel"], 1)
 
@@ -226,37 +301,183 @@ class attenMultiplyUNet2(nn.Module):
 
         res = self.linear(seg_256)
 
-        return res, seg_256, (atten_32, atten_64, atten_128, atten_256)
+        return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16
+
+
+class InitConv(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(InitConv, self).__init__()
+
+        # downsample
+        self.conv_ds = Conv2d_Bn_Relu(in_channel, out_channel, 3, 2, 1)
+        # process
+        self.conv1 = Conv2d_Bn_Relu(out_channel, out_channel, 3, 1, 1)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channel)
+        # res_link !!
+        self.conv_res = nn.Conv2d(in_channel, out_channel, 1, 2, 0, bias=False)
+        self.bn_res = nn.BatchNorm2d(out_channel)
+
+        self.relu = nn.ReLU()
+
+    def forward(self, img):
+        """
+        args:
+            img(torch.tensor): (B, C1, H, W)
+        output:
+            reconstructed_img(torch.tensor): ( B, C2, H/2, W/2)
+        """
+        x = self.conv_ds(img)
+        x = self.conv1(x)
+        x = self.bn2(self.conv2(x))
+        x = x + self.bn_res(self.conv_res(img)) # !!
+        return self.relu(x)
+
+
+class ResFilter(nn.Module):
+    def __init__(self, channel: int, kernel_size: int=3, padding:int=1):
+        super(ResFilter, self).__init__()
+        self.conv1 = Conv2d_Bn_Relu(channel, channel*2, kernel_size, 2, padding)
+        self.convT = nn.ConvTranspose2d(channel*2, channel, kernel_size, 2, 1, 1)
+        self.bnT = nn.BatchNorm2d(channel)
+        self.relu = nn.ReLU()
+
+    def forward(self, feature):
+        x = self.conv1(feature)
+        x = self.bnT(self.convT(x))
+        x = feature + x
+        return self.relu(x)
+
+
+class InitConv2(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(InitConv2, self).__init__()
+        self.conv0 = Conv2d_Bn_Relu(in_channel, out_channel, 3, 1, 1)
+        # process
+        self.conv1 = ResFilter(out_channel, 3, 1)
+        self.conv2 = ResFilter(out_channel, 3, 1)
+
+    def forward(self, img):
+        """
+        args:
+            img(torch.tensor): (B, C1, H, W)
+        output:
+            reconstructed_img(torch.tensor): ( B, C2, H/2, W/2)
+        """
+        x = self.conv0(img)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        return x
+
+
+class ResBlock2(nn.Module):
+    def __init__(self, channel: int, kernel_size: int=3, padding:int=1):
+        super(ResBlock2, self).__init__()
+        self.conv1 = Conv2d_Bn_Relu(channel, channel, kernel_size, 1, padding)
+        self.conv2 = nn.Conv2d(channel, channel, kernel_size, 1, padding, bias=False)
+        self.bn2 = nn.BatchNorm2d(channel)
+        self.relu = nn.ReLU()
+
+
+    def forward(self, feature):
+        x = self.conv1(feature)
+        x = self.bn2(self.conv2(x))
+        x = feature + x
+        return self.relu(x)
+    
+
+class US_Detect(nn.Module):
+    def __init__(self, in_channel: int):
+        super(US_Detect, self).__init__()
+        self.conv1 = Conv2d_Bn_Relu(in_channel, in_channel, 3, 1, 1)
+        self.conv2 = Conv2d_Bn_Relu(in_channel, in_channel, 3, 1, 1)
+        self.conv_linear = nn.Conv2d(in_channel, 1, 1, 1, 0)
+
+    def forward(self, feature):
+        x = F.interpolate(feature, scale_factor=2, mode='bilinear')
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv_linear(x)
+        return F.sigmoid(x)
+
+
+class attenMultiplyUNet2Stronger(nn.Module):
+    def __init__(self, cfg):
+        super(attenMultiplyUNet2Stronger, self).__init__()
+
+        self.conv = InitConv2(1, cfg["learning_conv_outchannel"])    # 256
+
+        self.ds1 = nn.Sequential(ConvDownSample2(cfg["learning_conv_outchannel"] , 32), 
+                                 ResBlock2(32)) # 128
+        self.ds2 = nn.Sequential(ConvDownSample2(32 , 64), 
+                                 ResBlock2(64),
+                                 ResBlock2(64))  # 64
+        self.ds3 = nn.Sequential(ConvDownSample2(64, 128), 
+                                 ResBlock2(128),
+                                 ResBlock2(128),
+                                 ResBlock2(128))    # 32
+        self.ds4 = nn.Sequential(ConvDownSample2(128, 256), 
+                                 ResBlock2(256))   # 16
+
+        self.us4 = ConvUpSample_plus(256, 128)
+        self.us3 = ConvUpSample_plus(128, 64)
+        self.us2 = ConvUpSample_plus(64, 32)
+        self.us1 = ConvUpSample_plus(32, cfg["learning_conv_outchannel"])
+
+        self.linear = DetectNet1(cfg["learning_conv_outchannel"], 1)
+
+    def forward(self, img):
+        x_256 = self.conv(img)
+        x_128 = self.ds1(x_256)
+        x_64 = self.ds2(x_128)
+        x_32 = self.ds3(x_64)
+        x_16 = self.ds4(x_32)
+
+        seg_32, atten_32 = self.us4(x_16, x_32)
+        seg_64, atten_64 = self.us3(seg_32, x_64)
+        seg_128, atten_128 = self.us2(seg_64, x_128)
+        seg_256, atten_256 = self.us1(seg_128, x_256)
+
+        res = self.linear(seg_256)
+
+        return res, seg_128, (atten_32, atten_64, atten_128, atten_256), x_16
 
 
 class attenMultiplyUNet_withloss(nn.Module):
     def __init__(self, cfg, feature_map=False):
         super(attenMultiplyUNet_withloss, self).__init__()
-        self.net = attenMultiplyUNet2(cfg)
+        self.net = attenMultiplyUNet2Stronger(cfg)
         self.loss_fn = SoftLoULoss()
         self.cfg = cfg
         self.feature_map = feature_map
+        
+        # self.class_ = Binaryhead_withLoss()
+
+        self.detail_loss = Detail_loss(0)
 
     def forward(self, img, label):
-        res, _feature_map, atten_maps = self.net(img)
+        res, _feature_map, atten_maps, f_16 = self.net(img)
         loss = self.loss_fn(res, label)
-        # 显示图片
-        row_num = 4
-        fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
-        for i in range(row_num):
-            axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray')
-            axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray')
-        plt.tight_layout()
-        plt.show()
-        a = input()
+        # class_loss = self.class_(f_16, label)
+        class_loss = torch.tensor([0.,],device=img.device)
+        detail_loss = self.detail_loss(res, label, img)
+        # # 显示图片
+        # row_num = 4
+        # fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
+        # for i in range(row_num):
+        #     axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray')
+        #     axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray')
+        # plt.tight_layout()
+        # plt.show()
+        # a = input()
         if self.feature_map:
             return res, loss, _feature_map
-        return res, loss
+        return res, loss, class_loss, detail_loss
     
     def pseudolabel_point2segment(self, label, loss=1.0, feature_map=None):
         """ 

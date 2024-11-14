@@ -128,7 +128,7 @@ class Trainer(object):
         #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
         elif args.dataset == "irstd1k":
             trainset = IRSTD1kDataset(
-                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size, cfg=self.cfg,
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size, cfg=self.cfg, pseudo_label=True
             )
             valset = IRSTD1kDataset(
                 base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size, cfg=self.cfg
@@ -169,7 +169,6 @@ class Trainer(object):
         # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=args.learning_rate,
         #                                  momentum=0.9, weight_decay=1e-4)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=args.lr)
-        # self.optimizer = torch.optim.Adam(self.net_heatmap.parameters(), lr=args.lr)
 
         ## evaluation metrics
         self.metric = SegmentationMetricTPFNFP(nclass=1)
@@ -194,7 +193,7 @@ class Trainer(object):
     def training(self):
         # training step
         start_time = time.time()
-        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f} || " \
+        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f}+{:.4f} || " \
                    "Cost Time: {} || Estimated Time: {}"
         for epoch in range(args.epochs):
             for i, (data, label) in enumerate(self.train_data_loader):
@@ -202,10 +201,11 @@ class Trainer(object):
                 label = label.to(self.device)
                 label = (label > self.cfg["label_vague_threshold"]).type(torch.float32)
 
-                _, loss_all = self.net(data, label)
+                _, softIoU_loss, class_loss, detail_loss = self.net(data, label)
+                total_loss = softIoU_loss + class_loss + detail_loss
 
                 self.optimizer.zero_grad()
-                loss_all.backward()
+                total_loss.backward()
                 self.optimizer.step()
 
                 # for name, param in self.net.named_parameters():
@@ -218,14 +218,13 @@ class Trainer(object):
                 eta_seconds = ((time.time() - start_time) / self.iter_num) * (self.max_iter - self.iter_num)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-                self.writer.add_scalar('Train Loss/Loss All', np.mean(loss_all.item()), self.iter_num)
+                self.writer.add_scalar('Train Loss/Loss All', np.mean(total_loss.item()), self.iter_num)
                 # self.writer.add_scalar("Train Loss/Loss SoftIoU", np.mean(loss_softiou.item()), self.iter_num)
                 # self.writer.add_scalar('Train Loss/Loss MSE', np.mean(loss_mse.item()), self.iter_num)
                 self.writer.add_scalar(
                     "Learning rate/", trainer.optimizer.param_groups[0]["lr"], self.iter_num
                 )
 
-                loss_softiou, loss_heatmap = torch.tensor([0.,]), torch.tensor([0.,])
                 if self.iter_num % self.args.log_per_iter == 0:
                     self.logger.info(
                         base_log.format(
@@ -234,7 +233,7 @@ class Trainer(object):
                             self.iter_num % self.iter_per_epoch,
                             self.iter_per_epoch,
                             self.optimizer.param_groups[0]["lr"],
-                            loss_all.item(), loss_softiou.item(), loss_heatmap.item(),
+                            total_loss.item(), softIoU_loss.item(), class_loss.item(), detail_loss.item(),
                             cost_string,
                             eta_string,
                         )
@@ -255,7 +254,7 @@ class Trainer(object):
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
                 # noise = torch.zeros((data.shape[0], 1, 32, 32), device=data.device)
-                pred, _, _ = self.net.net(data.to(self.device))
+                pred, _, _, _ = self.net.net(data.to(self.device))
             out_T = pred.cpu() 
 
             # loss_softiou = self.softiou(out_T, labels)

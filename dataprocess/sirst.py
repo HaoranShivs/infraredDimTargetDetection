@@ -54,6 +54,7 @@ class augumentation(object):
             input = input.transpose(1, 0)
             target = target.transpose(1, 0)
         return input.copy(), target.copy()
+
 # class SirstAugDataset(Data.Dataset):
 #     '''
 #     Return: Single channel
@@ -119,6 +120,7 @@ class IRSTD1kDataset(Data.Dataset):
         mode="train",
         base_size=256,
         pt_label=False,
+        pseudo_label=False,
         cfg=None
     ):
         assert mode in ["train", "test"]
@@ -134,6 +136,7 @@ class IRSTD1kDataset(Data.Dataset):
         self.cfg = cfg
         self.base_size = base_size
         self.pt_label = pt_label
+        self.pseudo_label = pseudo_label
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
@@ -155,7 +158,7 @@ class IRSTD1kDataset(Data.Dataset):
     def __getitem__(self, i):
         name = self.names[i]
         img_path = osp.join(self.data_dir, "images", name)
-        label_path = osp.join(self.data_dir, "masks", name)
+        label_path = osp.join(self.data_dir, "pixel_pseudo_label", name) if self.pseudo_label else osp.join(self.data_dir, "masks", name)
 
         img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
 
