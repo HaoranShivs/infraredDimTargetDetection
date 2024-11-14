@@ -152,13 +152,12 @@ class IRSTD1kDataset(Data.Dataset):
                 scale=(0.5, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
             transforms.RandomAffine(degrees=180, translate=(0.3, 0.3)),
             transforms.RandomHorizontalFlip(),  # 随机水平翻转
-            # Rotate_4D_Transform(),
         ])
 
     def __getitem__(self, i):
         name = self.names[i]
         img_path = osp.join(self.data_dir, "images", name)
-        label_path = osp.join(self.data_dir, "pixel_pseudo_label", name) if self.pseudo_label else osp.join(self.data_dir, "masks", name)
+        label_path = osp.join(self.data_dir, "pixel_pseudo_label2", name) if self.pseudo_label else osp.join(self.data_dir, "masks", name)
 
         img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
 

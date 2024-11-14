@@ -440,7 +440,7 @@ class attenMultiplyUNet2Stronger(nn.Module):
 
         res = self.linear(seg_256)
 
-        return res, seg_128, (atten_32, atten_64, atten_128, atten_256), x_16
+        return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16
 
 
 class attenMultiplyUNet_withloss(nn.Module):
@@ -459,7 +459,7 @@ class attenMultiplyUNet_withloss(nn.Module):
         res, _feature_map, atten_maps, f_16 = self.net(img)
         loss = self.loss_fn(res, label)
         # class_loss = self.class_(f_16, label)
-        class_loss = torch.tensor([0.,],device=img.device)
+        class_loss = torch.tensor([0.,], device=img.device)
         detail_loss = self.detail_loss(res, label, img)
         # # 显示图片
         # row_num = 4
