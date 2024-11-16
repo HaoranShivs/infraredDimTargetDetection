@@ -443,24 +443,108 @@ class attenMultiplyUNet2Stronger(nn.Module):
         return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16
 
 
+class ConvUpSample_plus2(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(ConvUpSample_plus2, self).__init__()
+        self.deep_proj = DeepFeatureExtractor(in_channel, out_channel, 3, 1)
+        self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
+        self.conv = DeepFeatureExtractor(out_channel, out_channel)
+ 
+    def forward(self, x_deep, x_shallow):
+        # attention computation
+        x_deep = self.deep_proj(x_deep)
+        x_shallow = self.shallow_proj(x_shallow)
+        x_shallow_ = F.max_pool2d(F.max_pool2d(x_shallow, 3, 2, 1), 3, 2, 1)
+        attn = torch.sum((x_deep - x_shallow_).pow(2), dim=1, keepdim=True)   #(B,1,S/4,S/4)
+        attn = F.interpolate(attn, scale_factor=4, mode='bilinear')
+        # like self_attn, 
+        x_deep = F.interpolate(x_deep, scale_factor=4, mode='nearest')
+        x = attn * x_deep + (1-attn) * x_shallow
+        x = self.conv(x) 
+        return x, attn
+
+    def normalize_tensor(self, tensor):
+        # 获取最小值和最大值
+        min_vals, _ = tensor.min(dim=-1, keepdim=True)
+        max_vals, _ = tensor.max(dim=-1, keepdim=True)
+        # 防止除零错误
+        range_vals = max_vals - min_vals
+        range_vals[range_vals == 0] = 1e8  # 如果最大值和最小值相等，设为1避免除零错误
+        # 归一化
+        normalized_tensor = (tensor - min_vals) / range_vals
+        return normalized_tensor
+
+
+class attenMultiplyUNet3(nn.Module):
+    def __init__(self, cfg):
+        super(attenMultiplyUNet3, self).__init__()
+
+        self.conv = InitConv2(1, cfg["learning_conv_outchannel"])    # 256
+
+        self.ds1 = nn.Sequential(ConvDownSample2(cfg["learning_conv_outchannel"] , 32), 
+                                 ResBlock2(32)) # 128
+        self.ds2 = nn.Sequential(ConvDownSample2(32 , 64), 
+                                 ResBlock2(64),
+                                 ResBlock2(64))  # 64
+        self.ds3 = nn.Sequential(ConvDownSample2(64, 128), 
+                                 ResBlock2(128),
+                                 ResBlock2(128),
+                                 ResBlock2(128))    # 32
+        # like deeplabv3
+        self.ds4 = nn.Sequential(nn.Conv2d(128, 256, 3, 2, padding=2, dilation=2),
+                                 ResBlock2(256),
+                                 ResBlock2(256))    # 16
+        self.ds5 = nn.Sequential(nn.Conv2d(128, 256, 3, 4, padding=4, dilation=4),
+                                 ResBlock2(256),
+                                 ResBlock2(256))    # 8
+        # self.ds6 = nn.Sequential(nn.Conv2d(128, 256, 3, 8, padding=8, dilation=8),
+        #                          ResBlock2(256),
+        #                          ResBlock2(256))    # 4
+        
+        self.us4 = ConvUpSample_plus2(256, 128) # 32
+        self.us3 = ConvUpSample_plus2(256, 64)  # 64
+        self.us2 = ConvUpSample_plus2(128, 32)   # 128
+        self.us1 = ConvUpSample_plus2(64, cfg["learning_conv_outchannel"])  # 256
+
+        self.linear = DetectNet1(cfg["learning_conv_outchannel"], 1)
+
+    def forward(self, img):
+        x_256 = self.conv(img)
+        x_128 = self.ds1(x_256)
+        x_64 = self.ds2(x_128)
+        x_32 = self.ds3(x_64)
+        x_16 = self.ds4(x_32)
+        x_8 = self.ds5(x_32)
+
+        seg_32, atten_32 = self.us4(x_8, x_32)
+        seg_64, atten_64 = self.us3(x_16, x_64)
+        seg_128, atten_128 = self.us2(seg_32, x_128)
+        seg_256, atten_256 = self.us1(seg_64, x_256)
+
+        res = self.linear(seg_256)
+
+        return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16
+
+
 class attenMultiplyUNet_withloss(nn.Module):
     def __init__(self, cfg, feature_map=False):
         super(attenMultiplyUNet_withloss, self).__init__()
-        self.net = attenMultiplyUNet2Stronger(cfg)
+        self.net = attenMultiplyUNet3(cfg)
         self.loss_fn = SoftLoULoss()
         self.cfg = cfg
         self.feature_map = feature_map
         
         # self.class_ = Binaryhead_withLoss()
 
-        self.detail_loss = Detail_loss(0)
+        # self.detail_loss = Detail_loss(0)
 
     def forward(self, img, label):
         res, _feature_map, atten_maps, f_16 = self.net(img)
         loss = self.loss_fn(res, label)
         # class_loss = self.class_(f_16, label)
         class_loss = torch.tensor([0.,], device=img.device)
-        detail_loss = self.detail_loss(res, label, img)
+        # detail_loss = self.detail_loss(res, label, img)
+        detail_loss = torch.tensor([0.,], device=img.device)
         # # 显示图片
         # row_num = 4
         # fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))

@@ -143,13 +143,13 @@ class IRSTD1kDataset(Data.Dataset):
                 self.names.append(filename)
 
         self.augment_test = transforms.Compose([
-            transforms.Resize((256, 256))
+            transforms.Resize((self.base_size, self.base_size))
         ])
 
         self.augment_train = transforms.Compose([
             transforms.RandomResizedCrop(
                 base_size,
-                scale=(0.5, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
+                scale=(0.8, 1.0)),  # 在给定的scale范围内随机缩放并裁剪
             transforms.RandomAffine(degrees=180, translate=(0.3, 0.3)),
             transforms.RandomHorizontalFlip(),  # 随机水平翻转
         ])
@@ -163,7 +163,9 @@ class IRSTD1kDataset(Data.Dataset):
 
         img = torch.from_numpy(img).type(torch.float32)
         mask = torch.from_numpy(mask).type(torch.float32)
-        data = torch.cat((img.unsqueeze(0), mask.unsqueeze(0)), dim=0)
+
+        img, mask = self.augment_test(img.unsqueeze(0)), self.augment_test(mask.unsqueeze(0))
+        data = torch.cat((img, mask), dim=0)
 
         data_aug = self.augment_train(data) if self.mode == "train" else self.augment_test(data)
 
