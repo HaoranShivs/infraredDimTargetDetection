@@ -118,17 +118,25 @@ class ImageRecoverLoss(nn.Module):
     
 
 class Detail_loss(nn.Module):
-    def __init__(self, dilation_kernel_size=3):
+    def __init__(self, dilation_kernel_size=5):
         super(Detail_loss, self).__init__()
         self.dilation_kernel_size = dilation_kernel_size
 
     def forward(self, preds, labels, images):
         # 对标签进行膨胀
         dilated_labels = self.dilate_labels(labels, self.dilation_kernel_size) if self.dilation_kernel_size > 0 else labels
-        # 将膨胀后的标签与原图相乘，得到抠图
-        cropped_images = self.min_max_normalize(images * dilated_labels)
-        cropped_images = (cropped_images * 0.7 + 0.3) * dilated_labels
+        # # 将膨胀后的标签与原图相乘，得到抠图
+        # cropped_images = self.min_max_normalize(images * dilated_labels)
+        # cropped_images = (cropped_images * 0.7 + 0.3) * dilated_labels
+        images = images * dilated_labels
         cropped_preds = preds * dilated_labels
+        B, _, _, _ = labels.shape
+        cropped_images = torch.zeros_like(images)
+        for i in range(B):
+            img = images[i, 0][dilated_labels[i,0]>0]
+            thre1, thre2 = self.multi_otsu_threshold(img)
+            cropped_images[i, 0][images[i, 0] >= thre2] = 1.
+            cropped_images[i, 0][(images[i, 0] >= thre1) & (images[i, 0] < thre2)] = 0.5
         # 计算损失
         loss = self.compute_weighted_mse(cropped_images, cropped_preds, dilated_labels)
         
@@ -169,3 +177,51 @@ class Detail_loss(nn.Module):
         # 归一化
         normalized_images = (images - min_vals) / range_vals
         return normalized_images
+    
+    def multi_otsu_threshold(self, image): 
+        # 将图像转换为PyTorch张量
+        image_tensor = image*255
+        
+        # 计算直方图
+        hist = torch.histc(image_tensor, bins=256, min=0, max=255)
+        hist = hist / hist.sum()  # 归一化直方图
+        
+        # 计算累积概率和累积均值
+        cum_hist = torch.cumsum(hist, dim=0)
+        cum_mean = torch.cumsum(hist * torch.arange(256, dtype=torch.float32), dim=0)
+        
+        # 总均值
+        total_mean = cum_mean[-1]
+        
+        # 创建所有可能的阈值组合
+        t1 = torch.arange(1, 255, dtype=torch.int64)
+        t2 = torch.arange(1, 255, dtype=torch.int64)
+        
+        # 生成网格
+        t1_grid, t2_grid = torch.meshgrid(t1, t2, indexing='ij')
+        
+        # 计算各部分的权重
+        w0 = cum_hist[t1_grid - 1]
+        w1 = cum_hist[t2_grid - 1] - cum_hist[t1_grid - 1]
+        w2 = 1 - cum_hist[t2_grid - 1]
+        
+        # 排除无效的权重组合
+        valid_mask = (w0 > 0) & (w1 > 0) & (w2 > 0)
+        
+        # 计算各部分的均值
+        smooth = 1e-8
+        mean0 = cum_mean[t1_grid - 1] / (w0 + smooth)
+        mean1 = (cum_mean[t2_grid - 1] - cum_mean[t1_grid - 1]) / (w1 + smooth)
+        mean2 = (total_mean - cum_mean[t2_grid - 1]) / (w2 + smooth)
+        
+        # 计算类间方差
+        between_var = w0 * (mean0 - total_mean) ** 2 + w1 * (mean1 - total_mean) ** 2 + w2 * (mean2 - total_mean) ** 2
+        
+        # 只考虑有效的权重组合
+        between_var[~valid_mask] = 0
+        
+        # 找到最大类间方差对应的阈值
+        max_var_idx = torch.argmax(between_var)
+        optimal_t1, optimal_t2 = t1_grid.flatten()[max_var_idx], t2_grid.flatten()[max_var_idx]
+    
+        return optimal_t1.item()/255, optimal_t2.item()/255

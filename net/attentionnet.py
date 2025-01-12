@@ -159,6 +159,7 @@ class Binaryhead_withLoss(nn.Module):
         new_tensor = tensor_split.view(4 * B, C, S // 2, S // 2)
         return new_tensor
 
+
 class interact(nn.Module):
     def __init__(self, dist):
         super(interact, self).__init__()
@@ -448,7 +449,7 @@ class ConvUpSample_plus2(nn.Module):
         super(ConvUpSample_plus2, self).__init__()
         self.deep_proj = DeepFeatureExtractor(in_channel, out_channel, 3, 1)
         self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
-        self.conv = DeepFeatureExtractor(out_channel, out_channel)
+        self.conv = DeepFeatureExtractor(out_channel*2, out_channel)
  
     def forward(self, x_deep, x_shallow):
         # attention computation
@@ -456,20 +457,61 @@ class ConvUpSample_plus2(nn.Module):
         x_shallow = self.shallow_proj(x_shallow)
         x_shallow_ = F.max_pool2d(F.max_pool2d(x_shallow, 3, 2, 1), 3, 2, 1)
         attn = torch.sum((x_deep - x_shallow_).pow(2), dim=1, keepdim=True)   #(B,1,S/4,S/4)
+        attn = self.normalize_tensor(attn)
         attn = F.interpolate(attn, scale_factor=4, mode='bilinear')
         # like self_attn, 
         x_deep = F.interpolate(x_deep, scale_factor=4, mode='nearest')
-        x = attn * x_deep + (1-attn) * x_shallow
-        x = self.conv(x) 
+        # x = attn * x_shallow + (1-attn) * x_deep
+        x = torch.concatenate((x_deep, x_shallow*attn), dim=1)
+        x = self.conv(x)
         return x, attn
 
     def normalize_tensor(self, tensor):
+        B, C, H, W = tensor.shape
         # 获取最小值和最大值
-        min_vals, _ = tensor.min(dim=-1, keepdim=True)
-        max_vals, _ = tensor.max(dim=-1, keepdim=True)
+        min_vals, _ = tensor.view(B, C, -1).min(dim=-1, keepdim=True)
+        max_vals, _ = tensor.view(B, C, -1).max(dim=-1, keepdim=True)
         # 防止除零错误
         range_vals = max_vals - min_vals
         range_vals[range_vals == 0] = 1e8  # 如果最大值和最小值相等，设为1避免除零错误
+        range_vals = range_vals.unsqueeze(-1).repeat(1,1,H,W)
+        min_vals = min_vals.unsqueeze(-1).repeat(1,1,H,W)
+        # 归一化
+        normalized_tensor = (tensor - min_vals) / range_vals
+        return normalized_tensor
+
+
+class ConvUpSample_plus3(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(ConvUpSample_plus3, self).__init__()
+        self.deep_proj = DeepFeatureExtractor(in_channel, out_channel, 3, 1)
+        self.shallow_proj = DeepFeatureExtractor(out_channel, out_channel, 3, 1)
+        self.conv = DeepFeatureExtractor(out_channel*2, out_channel)
+ 
+    def forward(self, x_deep, x_shallow):
+        # attention computation
+        x_deep = self.deep_proj(x_deep)
+        x_shallow = self.shallow_proj(x_shallow)
+        x_shallow_ = F.max_pool2d(F.max_pool2d(x_shallow, 3, 2, 1), 3, 2, 1)
+        # like self_attn, 
+        x_deep = F.interpolate(x_deep, scale_factor=4, mode='nearest')
+        B, _, S, _ = x_shallow.shape
+        attn = torch.zeros(B,1,S,S)
+        x = torch.concatenate((x_deep, x_shallow), dim=1)
+        x = self.conv(x)
+        return x, attn
+
+
+    def normalize_tensor(self, tensor):
+        B, C, H, W = tensor.shape
+        # 获取最小值和最大值
+        min_vals, _ = tensor.view(B, C, -1).min(dim=-1, keepdim=True)
+        max_vals, _ = tensor.view(B, C, -1).max(dim=-1, keepdim=True)
+        # 防止除零错误
+        range_vals = max_vals - min_vals
+        range_vals[range_vals == 0] = 1e8  # 如果最大值和最小值相等，设为1避免除零错误
+        range_vals = range_vals.unsqueeze(-1).repeat(1,1,H,W)
+        min_vals = min_vals.unsqueeze(-1).repeat(1,1,H,W)
         # 归一化
         normalized_tensor = (tensor - min_vals) / range_vals
         return normalized_tensor
@@ -505,8 +547,11 @@ class attenMultiplyUNet3(nn.Module):
         self.us3 = ConvUpSample_plus2(256, 64)  # 64
         self.us2 = ConvUpSample_plus2(128, 32)   # 128
         self.us1 = ConvUpSample_plus2(64, cfg["learning_conv_outchannel"])  # 256
+        # self.us0 = nn.Sequential(ConvT2d_Bn_Relu(32, cfg["learning_conv_outchannel"]),
+        #                          ShallowFeatureExtractor(cfg["learning_conv_outchannel"], cfg["learning_conv_outchannel"]))
 
-        self.linear = DetectNet1(cfg["learning_conv_outchannel"], 1)
+        self.linear128 = nn.Conv2d(32, 1, 1)
+        self.linear256 = nn.Conv2d(cfg["learning_conv_outchannel"], 1, 1)
 
     def forward(self, img):
         x_256 = self.conv(img)
@@ -521,9 +566,12 @@ class attenMultiplyUNet3(nn.Module):
         seg_128, atten_128 = self.us2(seg_32, x_128)
         seg_256, atten_256 = self.us1(seg_64, x_256)
 
-        res = self.linear(seg_256)
+        # seg_256  = torch.concatenate((F.interpolate(seg_128, scale_factor=2, mode='bilinear'), seg_256), dim=1)
+        res_128 = F.sigmoid(self.linear128(seg_128))
+        res_256 = F.sigmoid(self.linear256(seg_256))
+        res = F.interpolate(res_128, scale_factor=2, mode='nearest') * res_256
 
-        return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16
+        return res, seg_256, (atten_32, atten_64, atten_128, atten_256), x_16, res_128
 
 
 class attenMultiplyUNet_withloss(nn.Module):
@@ -539,8 +587,10 @@ class attenMultiplyUNet_withloss(nn.Module):
         # self.detail_loss = Detail_loss(0)
 
     def forward(self, img, label):
-        res, _feature_map, atten_maps, f_16 = self.net(img)
+        res, _feature_map, atten_maps, f_16, res_128 = self.net(img)
         loss = self.loss_fn(res, label)
+        label_128 = F.max_pool2d(label, 2, 2)
+        loss_128 = self.loss_fn(res_128, label_128)
         # class_loss = self.class_(f_16, label)
         class_loss = torch.tensor([0.,], device=img.device)
         # detail_loss = self.detail_loss(res, label, img)
@@ -561,7 +611,7 @@ class attenMultiplyUNet_withloss(nn.Module):
         # a = input()
         if self.feature_map:
             return res, loss, _feature_map
-        return res, loss, class_loss, detail_loss
+        return res, loss, class_loss, detail_loss, loss_128
     
     def pseudolabel_point2segment(self, label, loss=1.0, feature_map=None):
         """ 

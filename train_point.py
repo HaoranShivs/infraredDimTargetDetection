@@ -3,26 +3,20 @@ import os.path as osp
 import time
 import datetime
 from argparse import ArgumentParser
+from PIL import Image
 
 import yaml
 import numpy as np
 import torch
 import torch.utils.data as Data
-import torchvision.transforms as transforms
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # from models import get_model
-# from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
-from dataprocess.sirst_point import IRSTD1kDataset, NUDTDataset
-# from dataprocess.croped_sirst import Crop_IRSTD1kDataset, Crop_NUDTDataset
-# from net.basenet import BaseNet1, BaseNet2, BaseNet3, LargeBaseNet, LargeBaseNet2, GaussNet, GaussNet2, GaussNet3, GaussNet4, SigmoidNet
-from net.basenet import BaseNet4, BaseNetWithLoss
-from utils.loss import SoftLoULoss
-from utils.loss_point import ptlabel_loss
-# from net.twotasknet import Heatmap_net, LocalSegment, HeatMaptoImg, UnitLabels, TwoTaskNetWithLoss
-# from net.attentionnet import attenMultiplyUNet_withloss
+from dataprocess.sirst import NUDTDataset, IRSTD1kDataset
+
+from net.attentionnet import attenMultiplyUNet_withloss
 from utils.lr_scheduler import *
 from utils.evaluation import SegmentationMetricTPFNFP, my_PD_FA
 from utils.logger import setup_logger
@@ -98,7 +92,7 @@ def parse_args():
 
 def set_seeds(seed):
     np.random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -108,7 +102,6 @@ def set_seeds(seed):
 class Trainer(object):
     def __init__(self, args):
         self.args = args
-        self.iter_num = 0
 
         ## cfg file
         with open(args.cfg_path) as f:
@@ -116,7 +109,179 @@ class Trainer(object):
         with open(osp.join(self.args.save_folder, "cfg.yaml"), "w", encoding="utf-8") as file:
             yaml.dump(self.cfg, file, allow_unicode=True)
 
-        # dataset
+        ## GPU
+        if torch.cuda.is_available():
+            os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+        self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
+
+        # model
+        # net = BaseNet4(1, self.cfg)
+        # loss_fn = SoftLoULoss()
+        self.net = attenMultiplyUNet_withloss(self.cfg, False)
+
+        # self.net.apply(self.weight_init)
+        self.net = self.net.to(self.device)
+
+        ## evaluation metrics
+        self.metric = SegmentationMetricTPFNFP(nclass=1)
+        self.best_miou = 0
+        self.best_fmeasure = 0
+        self.best_prec = 0
+        self.best_recall = 0
+        self.eval_loss = 0  # tmp values
+        self.miou = 0
+        self.fmeasure = 0
+        self.eval_my_PD_FA = my_PD_FA()
+
+        ## log info
+        self.logger = args.logger
+        self.logger.info(args)
+        self.logger.info("Using device: {}".format(self.device))
+
+    def train(self, epochs):
+        iter_per_epoch = len(self.train_data_loader)
+        max_iter = epochs * iter_per_epoch
+        iter_num = 0
+        # training step
+        start_time = time.time()
+        base_log = (
+            "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}-{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f}+{:.4f} || "
+            "Cost Time: {} || Estimated Time: {}"
+        )
+        for epoch in range(epochs):
+            for i, (data, _, label) in enumerate(self.train_data_loader):
+                data = data.to(self.device)
+                label = label.to(self.device)
+                label = (label > self.cfg["label_vague_threshold"]).type(torch.float32)
+
+                _, softIoU_loss, class_loss, detail_loss, loss_128 = self.net(data, label)
+                total_loss = softIoU_loss + class_loss + detail_loss + loss_128
+
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                self.optimizer.step()
+
+                # for name, param in self.net.named_parameters():
+                #     if "net.linear" in name:
+                #         print(f"Gradient for {name}: {param.grad}")
+
+                iter_num += 1
+
+                cost_string = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+                eta_seconds = ((time.time() - start_time) / iter_num) * (max_iter - iter_num)
+                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+
+                self.writer.add_scalar("Train Loss/Loss All", np.mean(total_loss.item()), iter_num)
+                # self.writer.add_scalar("Train Loss/Loss SoftIoU", np.mean(loss_softiou.item()), iter_num)
+                # self.writer.add_scalar('Train Loss/Loss MSE', np.mean(loss_mse.item()), iter_num)
+                self.writer.add_scalar("Learning rate/", trainer.optimizer.param_groups[0]["lr"], iter_num)
+
+                if iter_num % self.args.log_per_iter == 0:
+                    self.logger.info(
+                        base_log.format(
+                            epoch + 1,
+                            args.epochs,
+                            iter_num % iter_per_epoch,
+                            iter_per_epoch,
+                            self.turn_epoch,
+                            self.optimizer.param_groups[0]["lr"],
+                            total_loss.item(),
+                            softIoU_loss.item(),
+                            class_loss.item(),
+                            detail_loss.item(),
+                            cost_string,
+                            eta_string,
+                        )
+                    )
+
+                if iter_num % iter_per_epoch == 0:
+                    self.net.eval()
+                    self.validation(epoch)
+                    self.net.train()
+                    self.scheduler(self.optimizer, i, epoch, None)
+
+    def infer(self):
+        trainset = IRSTD1kDataset(
+            base_dir=r"W:/DataSets/ISTD/IRSTD-1k",
+            mode="train",
+            base_size=256,
+            pt_label=True,
+            pseudo_label=True,
+            augment=False,
+            turn_num=self.turn_epoch,
+            cfg=self.cfg,
+        )
+        train_data_loader = Data.DataLoader(trainset, batch_size=32, shuffle=False, drop_last=False)
+        
+        net = self.net.net.eval()
+
+        origin_name = os.listdir("W:/DataSets/ISTD/IRSTD-1k/trainval/images")
+        idx = 0
+        pixel_pseudo_label_path = f'W:/DataSets/ISTD/IRSTD-1k/trainval/pixel_pseudo_label{self.turn_epoch+1}'
+        if not os.path.exists(pixel_pseudo_label_path):
+            os.makedirs(pixel_pseudo_label_path)
+
+        for j, (data, pt_labela, pixel_label) in enumerate(train_data_loader):
+            data = data.to("cuda")
+            preds, _, _, _, _ = net(data)
+            preds = preds.cpu().detach()
+
+            pseudo_label = (preds + pixel_label) / 2
+            pseudo_label_ = torch.zeros_like(pseudo_label)
+            # 优化区域，使得每一个点标签对应的一个区域灰度值最大为1，最小为0
+            B, _, S, _ = data.shape
+            indices = torch.where(pt_labela > 0.0)
+            region_size = 16
+            half_region_size = region_size // 2
+            for b, _, s1, s2 in zip(*indices): 
+                # 计算区域的边界
+                start_s1 = max(0, s1 - half_region_size)
+                end_s1 = min(S, s1 + half_region_size)
+                start_s2 = max(0, s2 - half_region_size)
+                end_s2 = min(S, s2 + half_region_size)
+                # 处理区域
+                region = pseudo_label[b, 0, start_s1:end_s1, start_s2:end_s2]
+                region_ = (region - torch.min(region)) / (torch.max(region) - torch.min(region))
+                pseudo_label_[b, 0, start_s1:end_s1, start_s2:end_s2] = region_
+
+                # 显示结果
+                print(torch.max(region_))
+                plt.figure(figsize=(12, 6))
+                plt.subplot(121), plt.imshow(region, cmap='gray')
+                plt.subplot(122), plt.imshow(region_, cmap='gray')
+                plt.show()
+                a= input()
+            
+            # row_num = 4
+            # col_num = 5
+            # fig, axes = plt.subplots(row_num, col_num, figsize=(col_num*4, row_num*4))
+            # for i in range(row_num):
+            #     axes[i, 0].imshow(data[i,0].cpu().detach().numpy(), cmap='gray')
+            #     axes[i, 1].imshow(pt_labela[i, 0].cpu().detach().numpy(), cmap='gray')
+            #     axes[i, 2].imshow(pixel_label[i, 0].cpu().detach().numpy(), cmap='gray')
+            #     axes[i, 3].imshow(preds[i, 0].cpu().detach().numpy(), cmap='gray')
+            #     axes[i, 4].imshow(pseudo_label_[i, 0].cpu().detach().numpy(), cmap='gray')
+            # plt.tight_layout()
+            # plt.show()
+            # a = input()
+
+            pseudo_label = np.array(pseudo_label_) * 255
+            for i in range(data.shape[0]):
+                pseudo_label_image = Image.fromarray(pseudo_label[i, 0].astype(np.uint8), mode="L")  # 'L' 表示灰度模式
+                pseudo_label_image.save(pixel_pseudo_label_path + "/" + origin_name[idx])
+                idx += 1
+        net = net.train()
+
+    def training(self):
+        self.turn_epoch = 0
+        # training record
+        path = osp.join(self.args.save_folder, f"{self.turn_epoch}")
+        if not os.path.exists(path):
+            os.makedirs(path)
+        ## SummaryWriter
+        self.writer = SummaryWriter(log_dir=path)
+        self.writer.add_text(osp.join(self.args.folder_name, f"{self.turn_epoch}"), "Args:%s, " % self.args)
+        ## dataset
         if args.dataset == "nudt":
             trainset = NUDTDataset(
                 base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size, cfg=self.cfg
@@ -131,7 +296,12 @@ class Trainer(object):
         #                              mode='test', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
         elif args.dataset == "irstd1k":
             trainset = IRSTD1kDataset(
-                base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="train", base_size=args.base_size, pt_label=True, cfg=self.cfg
+                base_dir=r"W:/DataSets/ISTD/IRSTD-1k",
+                mode="train",
+                base_size=args.base_size,
+                pseudo_label=True,
+                turn_num=0,
+                cfg=self.cfg,
             )
             valset = IRSTD1kDataset(
                 base_dir=r"W:/DataSets/ISTD/IRSTD-1k", mode="test", base_size=args.base_size, cfg=self.cfg
@@ -139,153 +309,75 @@ class Trainer(object):
         else:
             raise NotImplementedError
 
-        self.train_data_loader = Data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
-        self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size, shuffle=False, drop_last=False)
-        self.iter_per_epoch = len(self.train_data_loader)
-        self.max_iter = args.epochs * self.iter_per_epoch
-
-        ## GPU
-        if torch.cuda.is_available():
-            os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-        self.device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
-
-        ## model
-        net = BaseNet4(1, self.cfg)
-        loss_fn = ptlabel_loss()
-        self.net = BaseNetWithLoss(self.cfg, net, loss_fn)
-
-        # self.net.apply(self.weight_init)
-        self.net = self.net.to(self.device)
-
-        ## lr scheduler
-        self.scheduler = LR_Scheduler_Head(
-            args.lr_scheduler, args.lr, args.epochs, len(self.train_data_loader), lr_step=10
+        self.train_data_loader = Data.DataLoader(
+            trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=2
+        )
+        self.val_data_loader = Data.DataLoader(
+            valset, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=2
         )
 
+        ## lr scheduler
+        self.scheduler = LR_Scheduler_Head(args.lr_scheduler, 0.001, 200, len(self.train_data_loader), lr_step=10)
+
         ## optimizer
-        # self.optimizer = torch.optim.Adagrad(self.net.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-        # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=args.lr,
-        #                                  momentum=0.9, weight_decay=1e-4)
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=args.lr)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=0.001)
+        self.infer()
 
-        ## augmentor
-        self.augmentor = transforms.Compose([
-            transforms.RandomAffine(degrees=180, translate=(0.3, 0.3)),
-            transforms.RandomHorizontalFlip(),  # 随机水平翻转
-        ])
+        self.train(1)
 
-        ## evaluation metrics
-        self.metric = SegmentationMetricTPFNFP(nclass=1)
-        self.best_miou = 0
-        self.best_fmeasure = 0
-        self.best_prec = 0
-        self.best_recall = 0
-        self.eval_loss = 0  # tmp values
-        self.miou = 0
-        self.fmeasure = 0
-        self.eval_my_PD_FA = my_PD_FA()
+        net_path = osp.join(self.args.save_folder, f"{self.turn_epoch}", "best.pkl")
+        self.net.load_state_dict(torch.load(net_path))
 
-        # # SummaryWriter
-        self.writer = SummaryWriter(log_dir=args.save_folder)
-        self.writer.add_text(args.folder_name, "Args:%s, " % args)
+        self.infer()
 
-        ## log info
-        self.logger = args.logger
-        self.logger.info(args)
-        self.logger.info("Using device: {}".format(self.device))
-
-    def training(self):
-        # training step
-        start_time = time.time()
-        base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f} || " \
-                   "Cost Time: {} || Estimated Time: {}"
-        
-        # memory optimization
-        current_data = torch.zeros((self.iter_per_epoch * args.batch_size, 1, args.base_size, args.base_size), device=self.device)
-        current_label = torch.zeros((self.iter_per_epoch * args.batch_size, 1, args.base_size, args.base_size), device=self.device)
-        for epoch in range(args.epochs):
-            if epoch % self.cfg["epoch_num_modify_pseudo_label"] == 0:
-                self.net.eval()
-                for i, (data, label) in enumerate(self.train_data_loader):
-                    with torch.no_grad():
-                        data = data.to(self.device)
-                        label = label.to(self.device)
-                        if epoch > 0:
-                            _, _loss, _feature_map = self.net(data, current_label[i*data.shape[0]:(i+1)*data.shape[0]])
-                            label = self.net.pseudolabel_point2segment(label, 1 - epoch/self.args.epochs, _feature_map)
-                        current_data[i*self.args.batch_size:(i+1)*self.args.batch_size] = data
-                        current_label[i*self.args.batch_size:(i+1)*self.args.batch_size] = label
-                self.net.train()
-                # orig_labels = np.array(label.cpu())
-
-                row_num = 8
-                labels = np.array(current_label[:row_num].cpu())
-                datas = np.array(current_data[:row_num].cpu())
-                fig, axes = plt.subplots(row_num, 2)
-                for i in range(row_num):
-                    # plt.imshow(gaussp[0,0], cmap='gray')
-                    axes[i, 0].imshow(labels[i,0], cmap='gray')
-                    axes[i, 0].axis('off')  # 关闭坐标轴显示
-
-                    axes[i, 1].imshow(datas[i,0], cmap='gray')
-                    axes[i, 1].axis('off')  # 同样关闭坐标轴显示
-                    # plt.title('Blurred Image')
-                plt.tight_layout()
-                plt.show()
-                   
-            for i in range(self.iter_per_epoch):
-                data = current_data[i*self.args. batch_size:(i+1)*self.args.batch_size]
-                label = current_label[i*self.args.batch_size:(i+1)*self.args.batch_size]
-                # data augmentation
-                data = torch.concatenate((data, label), dim=1)
-                for j in range(data.shape[0]):
-                    data[j] = self.augmentor(data[j])
-                data, label = data[:,:1], data[:,1:]
-                _, dist_loss, gradient_loss = self.net(data, label)
-                total_loss = dist_loss + gradient_loss
-                self.optimizer.zero_grad()
-                total_loss.backward()
-                self.optimizer.step()
-
-                # for name, param in self.net.named_parameters():
-                #     if "net.linear" in name:
-                #         print(f"Gradient for {name}: {param.grad}")
-
-                self.iter_num += 1
-
-                cost_string = str(datetime.timedelta(seconds=int(time.time() - start_time)))
-                eta_seconds = ((time.time() - start_time) / self.iter_num) * (self.max_iter - self.iter_num)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-
-                self.writer.add_scalar('Train Loss/Loss All', np.mean(total_loss.item()), self.iter_num)
-                # self.writer.add_scalar("Train Loss/Loss SoftIoU", np.mean(loss_softiou.item()), self.iter_num)
-                # self.writer.add_scalar('Train Loss/Loss MSE', np.mean(loss_mse.item()), self.iter_num)
-                self.writer.add_scalar(
-                    "Learning rate/", trainer.optimizer.param_groups[0]["lr"], self.iter_num
+        for cycle_epoch in range(1, self.cfg["cycle_num"]):
+            self.turn_epoch = cycle_epoch
+            # training record
+            path = osp.join(self.args.save_folder, f"{self.turn_epoch}")
+            if not os.path.exists(path):
+                os.makedirs(path)
+            ## SummaryWriter
+            self.writer = SummaryWriter(log_dir=path)
+            self.writer.add_text(osp.join(self.args.folder_name, f"{self.turn_epoch}"), "Args:%s, " % self.args)
+            # dataset
+            if args.dataset == "nudt":
+                trainset = NUDTDataset(
+                    base_dir=r"W:/DataSets/ISTD/NUDT-SIRST", mode="train", base_size=args.base_size, cfg=self.cfg
                 )
+            # elif args.dataset == 'sirstaug':
+            #     trainset = SirstAugDataset(base_dir=r'./datasets/sirst_aug',
+            #                                mode='train', base_size=args.base_size)  # base_dir=r'E:\ztf\datasets\sirst_aug'
+            elif args.dataset == "irstd1k":
+                trainset = IRSTD1kDataset(
+                    base_dir=r"W:/DataSets/ISTD/IRSTD-1k",
+                    mode="train",
+                    base_size=args.base_size,
+                    cfg=self.cfg,
+                    turn_num=self.turn_epoch,
+                    pseudo_label=False,
+                )
+            else:
+                raise NotImplementedError
 
-                if self.iter_num % self.args.log_per_iter == 0:
-                    self.logger.info(
-                        base_log.format(
-                            epoch,
-                            args.epochs,
-                            self.iter_num % self.iter_per_epoch,
-                            self.iter_per_epoch,
-                            self.optimizer.param_groups[0]["lr"],
-                            total_loss.item(), dist_loss.item(), gradient_loss.item(),
-                            cost_string,
-                            eta_string,
-                        )
-                    )
+            self.train_data_loader = Data.DataLoader(
+                trainset, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=2
+            )
 
-                if self.iter_num % self.iter_per_epoch == 0:
-                    self.net.eval()
-                    self.validation()
-                    self.net.train()
-                    self.scheduler(self.optimizer, i, epoch, None)
+            ## lr scheduler
+            self.scheduler = LR_Scheduler_Head(args.lr_scheduler, 0.0001, 100, len(self.train_data_loader), lr_step=10)
 
+            ## optimizer
+            self.optimizer = torch.optim.Adam(self.net.parameters(), lr=0.0001)
+            self.infer()
 
-    def validation(self):
+            self.train(1)
+
+            # net_path = osp.join(self.args.save_folder, f"{self.turn_epoch}", "best.pkl")
+            # self.net.load_state_dict(torch.load(net_path))
+
+            self.infer()
+
+    def validation(self, epoch):
         self.metric.reset()
         # self.eval_my_PD_FA.reset()
         base_log = "Data: {:s}, mIoU: {:.4f}/{:.4f}, prec: {:.4f}/{:.4f}, recall: {:.4f}/{:.4f}, F1: {:.4f}/{:.4f} "
@@ -293,22 +385,17 @@ class Trainer(object):
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
                 # noise = torch.zeros((data.shape[0], 1, 32, 32), device=data.device)
-                pred = self.net.net(data.to(self.device))
+                pred, _, _, _, _ = self.net.net(data.to(self.device))
             out_T = pred.cpu()
 
-            # loss_softiou = self.softiou(out_T, labels)
-            # loss_mse = self.mse(out_D, data)
-            # gamma = torch.Tensor([0.1]).to(self.device)
-            # loss_all = loss_softiou + torch.mul(gamma, loss_mse)
-            
             labels = (labels > self.cfg["label_vague_threshold"]).type(torch.float32)
             self.metric.update(labels, out_T)
         miou_all, prec_all, recall_all, fmeasure_all = self.metric.get()
 
-        torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "latest.pkl"))
+        torch.save(self.net.state_dict(), osp.join(self.args.save_folder, f"{self.turn_epoch}", "latest.pkl"))
         if miou_all > self.best_miou:
             self.best_miou = miou_all
-            torch.save(self.net.state_dict(), osp.join(self.args.save_folder, "best.pkl"))
+            torch.save(self.net.state_dict(), osp.join(self.args.save_folder, f"{self.turn_epoch}", "best.pkl"))
         if fmeasure_all > self.best_fmeasure:
             self.best_fmeasure = fmeasure_all
         if prec_all > self.best_prec:
@@ -316,29 +403,24 @@ class Trainer(object):
         if recall_all > self.best_recall:
             self.best_recall = recall_all
 
-        # print(miou, self.best_miou, fmeasure, self.best_fmeasure)
-
-        self.writer.add_scalar("Test/mIoU", miou_all, self.iter_num)
-        self.writer.add_scalar("Test/F1", fmeasure_all, self.iter_num)
-        self.writer.add_scalar("Best/mIoU", self.best_miou, self.iter_num)
-        self.writer.add_scalar("Best/Fmeasure", self.best_fmeasure, self.iter_num)
+        self.writer.add_scalar("Test/mIoU", miou_all, epoch)
+        self.writer.add_scalar("Test/F1", fmeasure_all, epoch)
+        self.writer.add_scalar("Best/mIoU", self.best_miou, epoch)
+        self.writer.add_scalar("Best/Fmeasure", self.best_fmeasure, epoch)
 
         self.logger.info(
-            base_log.format(self.args.dataset, miou_all, self.best_miou, prec_all, self.best_prec, recall_all, self.best_recall, fmeasure_all, self.best_fmeasure)
+            base_log.format(
+                self.args.dataset,
+                miou_all,
+                self.best_miou,
+                prec_all,
+                self.best_prec,
+                recall_all,
+                self.best_recall,
+                fmeasure_all,
+                self.best_fmeasure,
+            )
         )
-
-    # def feature_map_loss(self, feature_map, data, label):
-    #     loss = torch.tensor([1.,], device=self.device)
-    #     for i, (data, label) in enumerate(self.train_data_loader):
-    #         with torch.no_grad():
-    #             data = data.to(self.device)
-    #             label = label.to(self.device)
-    #             label = self.net.pseudolabel_point2segment(label, loss, feature_map[i*data.shape[0]:(i+1)*data.shape[0]])
-    #             _, _loss, _feature_map = self.net(data, label)
-    #             feature_map[i*data.shape[0]:(i+1)*data.shape[0]] = _feature_map
-    #         loss += _loss /self.iter_per_epoch
-    #     print("loss of the new epoch: ", loss-1)
-    #     return feature_map, loss-1
 
     def load_model(self, model_path: str = "", model_path1: str = "", model_path2: str = ""):
         if model_path != "":

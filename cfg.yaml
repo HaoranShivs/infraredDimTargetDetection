@@ -29,3 +29,5 @@ target_detection_size: 32
 label_vague_threshold: 0.1
 
 epoch_num_modify_pseudo_label: 200
+
+cycle_num: 10

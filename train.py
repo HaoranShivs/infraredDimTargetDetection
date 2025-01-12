@@ -195,14 +195,15 @@ class Trainer(object):
         start_time = time.time()
         base_log = "Epoch-Iter: [{:03d}/{:03d}]-[{:03d}/{:03d}]  || Lr: {:.6f} ||  Loss: {:.4f}={:.4f}+{:.4f}+{:.4f} || " \
                    "Cost Time: {} || Estimated Time: {}"
+        self.net.eval()
         for epoch in range(args.epochs):
             for i, (data, label) in enumerate(self.train_data_loader):
                 data = data.to(self.device)
                 label = label.to(self.device)
                 label = (label > self.cfg["label_vague_threshold"]).type(torch.float32)
 
-                _, softIoU_loss, class_loss, detail_loss = self.net(data, label)
-                total_loss = softIoU_loss + class_loss + detail_loss
+                _, softIoU_loss, class_loss, detail_loss, loss_128 = self.net(data, label)
+                total_loss = softIoU_loss + class_loss + detail_loss + loss_128
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -254,7 +255,7 @@ class Trainer(object):
         for i, (data, labels) in enumerate(self.val_data_loader):
             with torch.no_grad():
                 # noise = torch.zeros((data.shape[0], 1, 32, 32), device=data.device)
-                pred, _, _, _ = self.net.net(data.to(self.device))
+                pred, _, _, _, _ = self.net.net(data.to(self.device))
             out_T = pred.cpu() 
 
             # loss_softiou = self.softiou(out_T, labels)

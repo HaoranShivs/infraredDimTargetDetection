@@ -121,6 +121,9 @@ class IRSTD1kDataset(Data.Dataset):
         base_size=256,
         pt_label=False,
         pseudo_label=False,
+        augment=True,
+        turn_num=0,
+        target_mix = False,
         cfg=None
     ):
         assert mode in ["train", "test"]
@@ -137,13 +140,16 @@ class IRSTD1kDataset(Data.Dataset):
         self.base_size = base_size
         self.pt_label = pt_label
         self.pseudo_label = pseudo_label
+        self.aug = augment
+        self.turn_num = turn_num
+        self.target_mix = target_mix
         self.names = []
         for filename in os.listdir(osp.join(self.data_dir, "images")):
             if filename.endswith("png"):
                 self.names.append(filename)
 
         self.augment_test = transforms.Compose([
-            transforms.Resize((self.base_size, self.base_size))
+            transforms.Resize((self.base_size, self.base_size), interpolation=transforms.InterpolationMode.NEAREST)
         ])
 
         self.augment_train = transforms.Compose([
@@ -153,21 +159,33 @@ class IRSTD1kDataset(Data.Dataset):
             transforms.RandomAffine(degrees=180, translate=(0.3, 0.3)),
             transforms.RandomHorizontalFlip(),  # 随机水平翻转
         ])
+        self.gaussian_blur = transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)) if target_mix else None
 
     def __getitem__(self, i):
         name = self.names[i]
         img_path = osp.join(self.data_dir, "images", name)
-        label_path = osp.join(self.data_dir, "pixel_pseudo_label2", name) if self.pseudo_label else osp.join(self.data_dir, "masks", name)
+        pseudo_label_path = osp.join(self.data_dir, f'pixel_pseudo_label{self.turn_num}', name)
+        label_path = osp.join(self.data_dir, "masks", name)
+        if self.pseudo_label:
+            img, mask, pseudo_label = cv2.imread(img_path, 0), cv2.imread(label_path, 0), cv2.imread(pseudo_label_path, 0)
 
-        img, mask = cv2.imread(img_path, 0), cv2.imread(label_path, 0)
+            img = torch.from_numpy(img).type(torch.float32)
+            mask = torch.from_numpy(mask).type(torch.float32)
+            pseudo_label = torch.from_numpy(pseudo_label).type(torch.float32)
+            
+            img, mask, pseudo_label = self.augment_test(img.unsqueeze(0)), self.augment_test(mask.unsqueeze(0)), self.augment_test(pseudo_label.unsqueeze(0))
+            data = (img, mask, pseudo_label)
+        else:
+            img, mask= cv2.imread(img_path, 0), cv2.imread(label_path, 0)
 
-        img = torch.from_numpy(img).type(torch.float32)
-        mask = torch.from_numpy(mask).type(torch.float32)
+            img = torch.from_numpy(img).type(torch.float32)
+            mask = torch.from_numpy(mask).type(torch.float32)
+            img, mask = self.augment_test(img.unsqueeze(0)), self.augment_test(mask.unsqueeze(0))
 
-        img, mask = self.augment_test(img.unsqueeze(0)), self.augment_test(mask.unsqueeze(0))
-        data = torch.cat((img, mask), dim=0)
+            data = (img, mask)
+        data = torch.cat(data, dim=0) 
 
-        data_aug = self.augment_train(data) if self.mode == "train" else self.augment_test(data)
+        data_aug = self.augment_train(data) if self.mode == "train" and self.aug else data
 
         data_aug = data_aug / 255.0
 
@@ -175,9 +193,25 @@ class IRSTD1kDataset(Data.Dataset):
 
         if self.pt_label:
             pt_label = self.__mask2point(data_aug[1])
+            # data_aug = torch.concatenate((data_aug,pt_label.unsqueeze(0)),dim=0)
             data_aug[1] = pt_label
-
-        return data_aug[0], data_aug[1]
+        # row_num = 4
+        # col_num = 4
+        # fig, axes = plt.subplots(row_num, col_num, figsize=(col_num*4, row_num*4))
+        # for i in range(row_num):
+        #     axes[i, 0].imshow(data_aug[0,0].numpy(), cmap='gray')
+        #     axes[i, 1].imshow(data_aug[1,0].numpy(), cmap='gray')
+        #     axes[i, 2].imshow(data_aug[2,0].numpy(), cmap='gray')
+        #     axes[i, 3].imshow(data_aug[3,0].numpy(), cmap='gray')
+        # plt.tight_layout()
+        # plt.show()
+        # a = input()
+        elif self.target_mix:
+            data_aug[0], data_aug[1] = self.__mix_target(data_aug[0], data_aug[1], i)
+        if self.pseudo_label:
+            return data_aug[0], data_aug[1], data_aug[2]
+        else:
+            return data_aug[0], data_aug[1]
 
     def __len__(self):
         return len(self.names)
@@ -186,7 +220,7 @@ class IRSTD1kDataset(Data.Dataset):
         # 将mask转换为numpy数组以便处理
         mask_array = np.array(mask[0])
         # 使用连通组件分析找到所有独立的目标区域
-        labels, num_features = scipy.ndimage.label(mask_array > self.cfg["label_vague_threshold"])
+        labels, num_features = scipy.ndimage.label(mask_array > 0.9)
 
         pts_label = torch.zeros_like(mask, dtype=torch.float32)
 
@@ -214,6 +248,63 @@ class IRSTD1kDataset(Data.Dataset):
             pts_label[0, center_y, center_x] = 1.0
 
         return pts_label
+
+    def __mix_target(self, img, mask, idx):
+        """
+        Mix the target with image and mask.
+        Target is from perferct generated pesudo label, with no dissociated pixels.
+        Mixing includs the following steps:
+        1. Find the proper position for the target where the img is complex. Furthermore, complex area means there are many edges.
+        2. Mix the target with image in proper way which means the border of the target and background is smooth.
+        3. Make mask according to the new and original target.
+        """
+        # Select random target
+        target_path = osp.join(self.data_dir, "perfect_target")
+        target_names = os.listdir(target_path)
+        target_name = random.choice(target_names)
+        target = cv2.imread(osp.join(target_path, target_name), 0)
+        target = torch.from_numpy(target).type(torch.float32)
+        target_blured = self.gaussian_blur(target.unsqueeze(0)).squeeze(0)
+
+        edge_path = osp.join(self.data_dir, "canny_edge")
+        name = self.names[idx]
+
+        edge = cv2.imread(osp.join(edge_path, name), 0)
+        edge = torch.from_numpy(edge).type(torch.float32)
+        # Step 1
+        # find a 32*32 area where the complexicity is mid-level.
+        h_idx, w_idx = self.__random_position(edge)
+        # mix the target with image(simple way)
+        img[0, h_idx-16:h_idx+16, w_idx-16:w_idx+16] = target_blured[0,0]
+        # mix the target with mask
+        mask[0, h_idx-16:h_idx+16, w_idx-16:w_idx+16] = target
+        
+        return img, mask
+
+    def __random_position(self, edge):
+        """
+        Randomly choose a position for the target.
+        """
+        edge_level = torch.nn.functional.avg_pool2d(edge.unsqueeze(0).unsqueeze(0), 2, stride=2)  # (1,1,256,256)
+        edge_level = torch.nn.functional.avg_pool2d(edge_level, 2, stride=2)    # (1,1,128,128)
+        edge_level = torch.nn.functional.avg_pool2d(edge_level, 2, stride=2)    # (1,1,64,64)
+
+        edge_mean = edge_level.mean()
+        edge_mid = (edge_level.max() + edge_level.min()) / 2
+        condition = (edge_level > edge_mean) * (edge_level < edge_mid)  # ??? is it proper?
+        _, _, H_idx, W_idx = torch.where(condition)
+        print(H_idx.shape)
+        
+        random_idx = torch.randint(0, H_idx.shape[0], (1,))
+        rh_idx, w_idx = int(H_idx[random_idx].item()), int(W_idx[random_idx].item())
+        rh_idx, w_idx = rh_idx * 4 + 2, w_idx * 4 + 2
+        while(rh_idx < 16 or rh_idx > 240 or w_idx < 16 or w_idx > 240):
+            random_idx = torch.randint(0, H_idx.shape[0], (1,))
+            rh_idx, w_idx = int(H_idx[random_idx].item()), int(W_idx[random_idx].item())
+            rh_idx, w_idx = rh_idx * 4 + 2, w_idx * 4 + 2
+
+        return rh_idx, w_idx
+
 
 
 class NUDTDataset(Data.Dataset):
