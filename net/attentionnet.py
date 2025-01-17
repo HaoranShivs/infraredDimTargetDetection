@@ -595,20 +595,20 @@ class attenMultiplyUNet_withloss(nn.Module):
         class_loss = torch.tensor([0.,], device=img.device)
         # detail_loss = self.detail_loss(res, label, img)
         detail_loss = torch.tensor([0.,], device=img.device)
-        # # 显示图片
-        # row_num = 4
-        # fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
-        # for i in range(row_num):
-        #     axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray')
-        #     axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray')
-        # plt.tight_layout()
-        # plt.show()
-        # a = input()
+        # 显示图片
+        row_num = 4
+        fig, axes = plt.subplots(row_num, 7, figsize=(7*3, row_num*3))
+        for i in range(row_num):
+            axes[i, 0].imshow(img[i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 1].imshow(atten_maps[0][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 2].imshow(atten_maps[1][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 3].imshow(atten_maps[2][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 4].imshow(atten_maps[3][i,0].cpu().detach().numpy(), cmap='gray')
+            axes[i, 5].imshow(res[i,0].cpu().detach().numpy(), cmap='gray', vmin=0., vmax=1.)
+            axes[i, 6].imshow(label[i,0].cpu().detach().numpy(), cmap='gray', vmin=0., vmax=1.)
+        plt.tight_layout()
+        plt.show()
+        a = input()
         if self.feature_map:
             return res, loss, _feature_map
         return res, loss, class_loss, detail_loss, loss_128
