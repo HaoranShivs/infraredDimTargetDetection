@@ -452,17 +452,18 @@ class ConvUpSample_plus2(nn.Module):
         self.conv = DeepFeatureExtractor(out_channel*2, out_channel)
  
     def forward(self, x_deep, x_shallow):
-        # attention computation
+        B,_, S, _ = x_shallow.shape
+        # attention computation 
         x_deep = self.deep_proj(x_deep)
         x_shallow = self.shallow_proj(x_shallow)
-        x_shallow_ = F.max_pool2d(F.max_pool2d(x_shallow, 3, 2, 1), 3, 2, 1)
-        attn = torch.sum((x_deep - x_shallow_).pow(2), dim=1, keepdim=True)   #(B,1,S/4,S/4)
-        attn = self.normalize_tensor(attn)
-        attn = F.interpolate(attn, scale_factor=4, mode='bilinear')
-        # like self_attn, 
+        # x_shallow_ = F.max_pool2d(F.max_pool2d(x_shallow, 3, 2, 1), 3, 2, 1)
+        # attn = torch.sum((x_deep - x_shallow_).pow(2), dim=1, keepdim=True)   #(B,1,S/4,S/4)
+        # attn = self.normalize_tensor(attn)
+        # attn = F.interpolate(attn, scale_factor=4, mode='bilinear')
+        # # like self_attn, 
         x_deep = F.interpolate(x_deep, scale_factor=4, mode='nearest')
-        # x = attn * x_shallow + (1-attn) * x_deep
-        x = torch.concatenate((x_deep, x_shallow*attn), dim=1)
+        attn = torch.ones(B, 1, S, S, device=x_shallow.device)
+        x = torch.concatenate((x_deep, x_shallow * attn), dim=1)
         x = self.conv(x)
         return x, attn
 
